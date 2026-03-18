@@ -1,0 +1,71 @@
+global:
+  edge: "K"
+  element: "Ni"
+  edge_pos: 8333
+  pre_edge_range: [-110, -40]
+  post_edge_range: [113, 1200]
+
+  path: "X:\\raw data\\XAS\\MAX IV Balder 2026 29 01 - 02 02\\2026012908\\raw"
+  beamline: "Balder"
+  plot: False
+
+Normalizer:
+  post_order: 3
+  # plot: False # overwrite default plotting behaviour of module
+  # name: Normalizer # overwrite default name of module
+  
+NoiseFilter:
+  gate: 1.5
+  plot: True # overwrite default plotting behaviour of module
+  # name: NoiseFilter # overwrite default name of module
+
+# Savgol_filter:
+  # window_length: 15 # number of consecutive points used in the window of the filter
+  # polyorder: 3 # order of the polynominal fitted in the window
+  # plot: True # overwrite default plotting behaviour of module
+  # name: Savgol_filter # overwrite default name of module
+
+Rebinner:
+  # edge_range: [-40, 150] # range using edge_bin, all before uses pre_edge_bin, all behind uses post_edge_bin.
+  # Automatically uses values from global pre_edge and post_edge ranges if not provided
+  # pre_edge_bin: 10 # size of the bins of the pre_edge_region in eV
+  # edge_bin: 1 # size of the bins of the edge_region in eV
+  # post_edge_bin: 0.05 # size of the bins of the post_edge_region in A-1
+  # plot: True # overwrite default plotting behaviour of module
+  # name: Rebinner # overwrite default name of module
+
+Merger:
+  mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
+  threshold: 0.03 # Value used in 'auto' mode to decide how much variation can be in one group
+  plot: False # overwrite default plotting behaviour of module
+  # name: Merger # overwrite default name of module
+
+# SVDDecompositor:
+  # mode: "threshold" # decide to use threshold or n_comp cutoff
+  # threshold: 1 # threshold for singluar value cutoff when mode is 'threshold'
+  # n_comp: 5 # Number of svd components used when mode is 'n_comp'
+  # name: SVDDecompositor # overwrite default name of module
+
+# EdgeLC:
+  # pre: None
+  # post: None
+  # spec1: 0 # Reference Spectra 0, either passed by index or passed py path
+  # spec2: -1 # Reference Spectra -1, either passed by index or passed py path
+  # name: EdgeLC # overwrite default name of module
+
+# EdgeDiffPlotter
+
+  # name: EdgeDiffPlotter # overwrite default name of module
+
+Plotter:
+  diff: False # Show to difference to the reference or show plain data
+  ref: 0 # Reference spectra for diff mode either index or path
+  k_order: 2 # n in k^n*Chi(k) for k visualisations
+  # name: Plotter # overwrite default name of module
+
+Exporter:
+  path: "C:\\Users\\loesekej\\Desktop\\zwischenspeicher" # Path where output is stored
+  # exp_name: someName # name of output file. If not provided will use the exp_name passed in command line or in the global block
+  comment: "lololololol" # Additional comment printed in output file
+  # name: Exporter # overwrite default name of module
+

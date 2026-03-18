@@ -1,0 +1,7 @@
+# ignore everything
+*
+
+# whitelist this
+!.gitignore
+!XASPipeline.py
+!config.yaml
