@@ -10,9 +10,10 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from matplotlib import colormaps
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
-from sklearn.linear_model import LinearRegression
-from typing import ClassVar, Any, Callable, Literal, Iterator, Optional
+from multiprocessing.pool import ThreadPool
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, BeforeValidator
+from lmfit import Parameters, minimize, report_fit
+from typing import Annotated, ClassVar, Literal, Optional, Any
 
 
 def deltaE2k(deltaE):
@@ -50,6 +51,30 @@ def readDatCols(logger, file_path, cols) -> np.array:
             nums = line.split()
             data.append([float(nums[i]) for i in cols])
         return t, np.array(data)
+    
+def readNorm(file_path: pathlib.Path, useCol: int | str = "flat") -> tuple[np.ndarray, np.ndarray]:
+    energies, absorption = [], []
+    headerline = ""
+    if isinstance(useCol, int):
+        startReadout = True
+    else:
+        startReadout = False
+    with open(file_path, 'r') as f:
+        for l in f:
+            if l[0] == "#":
+                headerline = l
+            else:
+                if not startReadout:
+                    try:
+                        useCol = headerline.split()[1:].index(useCol)
+                    except ValueError:
+                        useCol = 1
+                    startReadout = True
+                words = l.split()
+                energies.append(words[0])
+                absorption.append(words[useCol])
+        
+    return np.array(energies), np.array(absorption)
 
 #region dataclass
 class XASPara:
@@ -208,6 +233,44 @@ class XASData:
         return slice(np.argmax(self.energies > low), np.argmax(self.energies > up) -1)
 #endregion
 
+#region XASReference
+class XASRef(BaseModel):
+    mu: Optional[np.ndarray] = None
+    name: str
+    _source_e: Optional[np.ndarray] = None
+    _source_mu: Optional[np.ndarray] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @classmethod
+    def from_norm(cls, path: pathlib.Path) -> "XASRef":
+        name = path.stem
+        energy, mu = readNorm(path)
+        return cls(name = name, _source_e = energy, _source_mu = mu)
+
+    def resample(self, target_energy: np.ndarray):
+        if self.mu is not None:
+            if len(self.mu) == len(target_energy):
+                return
+        if self._source_e is not None and self._source_mu is not None:
+            self.mu = self._rebin(target_energy)
+        else:
+            raise ValueError("XASRef has not data and no source to resample from!")
+    
+    def _rebin(self, target_energy: np.ndarray):
+        midpoints = (target_energy[:-1] + target_energy[1:]) / 2
+        edges = np.concatenate([
+            [target_energy[0] - (target_energy[1] - target_energy[0]) / 2],
+            midpoints,
+            [target_energy[-1] + (target_energy[-1] - target_energy[-2]) / 2]
+        ])
+
+        cum_integral = sp.integrate.cumulative_trapezoid(self._source_mu, x = self._source_e)
+        resampled_integral = np.interp(edges, self._source_e, cum_integral)
+        return np.diff(resampled_integral) / np.diff(edges)
+
+def str2Ref(x: Any) -> Any:
+    return XASRef.from_norm(pathlib.Path(x)) if isinstance(x, (str,pathlib.Path)) else x
+
 #region PipelineContex
 class PipelineContext(BaseModel):
     path: pathlib.Path
@@ -272,6 +335,7 @@ class Preprocessor(Processor):
         plt.subplots()
         for i, spectra in enumerate(self._data.absorption[::step, :]):
             plt.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
+        plt.title(f"Preprocessor {self.name}")
         plt.legend(frameon=False, loc="lower right", ncols=2)
         plt.show()
 
@@ -336,8 +400,9 @@ class NoiseFilter(Preprocessor):
         if self.plot:
             plt.subplots()
             plt.title(f"Preprocessor {self.name}")
-            num_bins = int(np.ceil(rms_noise.max() / (np.median(rms_noise) / 8))) + 1
-            plt.hist(rms_noise, log=True, bins=[i * np.median(rms_noise) / 8 for i in range(num_bins)])
+            # num_bins = int(np.ceil(rms_noise.max() / (np.median(rms_noise) / 8))) + 1
+            # plt.hist(rms_noise, log=True, bins=[i * np.median(rms_noise) / 8 for i in range(num_bins)])
+            plt.hist(rms_noise, log=True)
             plt.axvline(threshold, color="black", ls="dotted")
             plt.show()
 
@@ -529,6 +594,7 @@ class SVDDecompositor(Analyzer):
         a_approx = U @ np.diag(S) @ Vh
 
         fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
+        fig.suptitle(f"Analyzer {self.name}")
         step = max(int(len(self._data.times)/20), 1)
         for i, spectra in enumerate((self._data.absorption - a_approx)[::step, :]):
             axul.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
@@ -545,36 +611,68 @@ class SVDDecompositor(Analyzer):
 class EdgeLC(Analyzer):
     pre: float = None
     post: float = None
-    spec1: np.ndarray | int = 0
-    spec2: np.ndarray | int = -1
+    refs: list[Annotated[XASRef, BeforeValidator(str2Ref)]| int] = [0, -1]
     def _analyse(self):
-        print("TODO: enable more reference spectra and path import")
+        weight = 1000
         if isinstance(self.pre, type(None)):
             self.pre = self.para._pre_edge_range[1]
         if isinstance(self.post, type(None)):
             self.post = self.para._post_edge_range[0]
-        if isinstance(self.spec1, int):
-            self.spec1 = self._data.absorption[self.spec1]
-        if isinstance(self.spec2, int):
-            self.spec2 = self._data.absorption[self.spec2]
-        
         e_slice = self._data.energyRange2idx(self.para.edge_pos + self.pre, self.para.edge_pos + self.post)
 
-        x = np.clip(np.linalg.lstsq((self.spec2-self.spec1)[e_slice, np.newaxis], (self._data.absorption - self.spec1)[:,e_slice].T)[0].flatten(), 0, 1)
+        for i, r in enumerate(self.refs):
+            if isinstance(r, int):
+                self.refs[i] = XASRef(mu = self._data.absorption[r,e_slice], name = f"Ref{i}")
+            else:
+                r.resample(self._data.energies[e_slice])
+        
+        mu = np.append(self._data.absorption[:,e_slice], np.full((len(self._data.times), 1), weight), axis=1)
+        refs = np.column_stack([np.append(r.mu, [weight]) for r in self.refs])
 
-        fig, ax = plt.subplots(figsize=(8,4))
-        ax.plot(self._data.times, x)
+        coeffs = np.ones((len(self._data.times), len(self.refs)))
+        def fit_nnls(t_idx):
+            coeffs[t_idx], _ = sp.optimize.nnls(refs, mu[t_idx])
+
+        with ThreadPool(processes=8) as pool:
+            pool.map(fit_nnls, range(len(self._data.times)))
+
+        # paras = Parameters()
+        # for r in self.refs[:-1]:
+        #     paras.add(r.name.replace(" ", "_"), value = 1/len(self.refs), min = 0, max = 1)
+        # paras.add(r.name, value = 1/len(self.refs), min = 0, max = 1, expr=f"1 - ({" + ".join(paras.keys())})")
+
+        # results = [None for _ in self._data.times]
+        # mu_refs = [r.mu for r in self.refs]
+
+        # def fit_tp(t_idx):
+        #     local_paras = paras.copy()
+        #     def obj(p):
+        #         return np.dot([p[r.name] for r in self.refs], mu_refs) - mu[t_idx]
+
+        #     results[t_idx] = minimize(obj, paras, method="leastsq")
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
+        fig.suptitle(f"Analyzer {self.name}")
+        for i in range(len(self.refs)):
+            ax1.plot(self._data.times, coeffs[:,i], label = self.refs[i].name)
+        ax1.legend(loc="upper center", ncols=3)
+
+        cum_coeffs = np.cumsum(coeffs,axis=1)
+        for i in reversed(range(len(self.refs))):
+            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=10)
+        ax2.legend(loc="upper center", ncols=3)
 
 
 class Plotter(Analyzer):
     diff: bool = True
-    ref: int | np.array = 0
+    ref: int | np.ndarray = 0
     k_order: int = 2
     def _analyse(self):
         if self._data.normalized:
             fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
         else:
             fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,4), layout="tight", width_ratios=(1,1))
+        fig.suptitle(f"Analyzer {self.name}")
 
         step = max(int(len(self._data.times)/20), 1)
 

@@ -16,7 +16,7 @@ Normalizer:
   
 NoiseFilter:
   gate: 1.5
-  plot: True # overwrite default plotting behaviour of module
+  plot: False # overwrite default plotting behaviour of module
   # name: NoiseFilter # overwrite default name of module
 
 # Savgol_filter:
@@ -26,39 +26,39 @@ NoiseFilter:
   # name: Savgol_filter # overwrite default name of module
 
 Rebinner:
-  # edge_range: [-40, 150] # range using edge_bin, all before uses pre_edge_bin, all behind uses post_edge_bin.
+  edge_range: [-40, 150] # range using edge_bin, all before uses pre_edge_bin, all behind uses post_edge_bin.
   # Automatically uses values from global pre_edge and post_edge ranges if not provided
-  # pre_edge_bin: 10 # size of the bins of the pre_edge_region in eV
-  # edge_bin: 1 # size of the bins of the edge_region in eV
-  # post_edge_bin: 0.05 # size of the bins of the post_edge_region in A-1
+  pre_edge_bin: 10 # size of the bins of the pre_edge_region in eV
+  edge_bin: 1 # size of the bins of the edge_region in eV
+  post_edge_bin: 0.05 # size of the bins of the post_edge_region in A-1
   # plot: True # overwrite default plotting behaviour of module
   # name: Rebinner # overwrite default name of module
 
-Merger:
-  mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
-  threshold: 0.03 # Value used in 'auto' mode to decide how much variation can be in one group
-  plot: False # overwrite default plotting behaviour of module
-  # name: Merger # overwrite default name of module
+# Merger:
+#   mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
+#   threshold: 0.025 # Value used in 'auto' mode to decide how much variation can be in one group
+#   plot: True # overwrite default plotting behaviour of module
+#   # name: Merger # overwrite default name of module
 
 # SVDDecompositor:
-  # mode: "threshold" # decide to use threshold or n_comp cutoff
-  # threshold: 1 # threshold for singluar value cutoff when mode is 'threshold'
-  # n_comp: 5 # Number of svd components used when mode is 'n_comp'
-  # name: SVDDecompositor # overwrite default name of module
+#   mode: "n_comp" # decide to use threshold or n_comp cutoff
+#   threshold: 1 # threshold for singluar value cutoff when mode is 'threshold'
+#   n_comp: 2 # Number of svd components used when mode is 'n_comp'
+#   name: SVDDecompositor # overwrite default name of module
 
-# EdgeLC:
+EdgeLC:
   # pre: None
   # post: None
-  # spec1: 0 # Reference Spectra 0, either passed by index or passed py path
-  # spec2: -1 # Reference Spectra -1, either passed by index or passed py path
+  refs: # Reference Spectra either passed by index in data array or by path of norm file
+    - 0
+    - -1
   # name: EdgeLC # overwrite default name of module
 
 # EdgeDiffPlotter
-
   # name: EdgeDiffPlotter # overwrite default name of module
 
 Plotter:
-  diff: False # Show to difference to the reference or show plain data
+  diff: True # Show to difference to the reference or show plain data
   ref: 0 # Reference spectra for diff mode either index or path
   k_order: 2 # n in k^n*Chi(k) for k visualisations
   # name: Plotter # overwrite default name of module
@@ -66,6 +66,6 @@ Plotter:
 Exporter:
   path: "C:\\Users\\loesekej\\Desktop\\zwischenspeicher" # Path where output is stored
   # exp_name: someName # name of output file. If not provided will use the exp_name passed in command line or in the global block
-  comment: "lololololol" # Additional comment printed in output file
+  # comment: "lololololol" # Additional comment printed in output file
   # name: Exporter # overwrite default name of module
 
