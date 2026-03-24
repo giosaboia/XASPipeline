@@ -210,7 +210,7 @@ class XASData:
                 f.write(f"# Column.1:                      energy eV\n")
                 f.write(f"# Column.2:                      {int(self.times[i])}\n")
                 f.write("# ///\n#------------------------\n")
-                f.write("# "+"".join(["%-17s" %"e", "%-17s" %f"norm{(self.times[i])}"]) + "\n")
+                f.write("# "+"".join(["%-17s" %"e", "%-17s" %"norm"]) + "\n")
                 for energy, abs_vals in zip(self.energies, self.absorption[i].T):
                     line_elements = [f" {energy:10.4f}    ", abs2AthenaRep(abs_vals)]
                     f.write("".join(line_elements) + "\n")
