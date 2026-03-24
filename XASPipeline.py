@@ -106,6 +106,7 @@ class XASData:
     normalized: bool = False
 
     def __post_init__(self):
+        self.removeNan()
         self.validate()
 
     @classmethod
@@ -131,10 +132,16 @@ class XASData:
 
     @classmethod
     def extract_data_hdf5(cls, logger: logging.Logger, files: list[pathlib.Path]):
+        def conv_time(date_str: str):
+            try:
+                return datetime.strptime(str(t)[2:-1], r"%Y-%m-%d %H:%M:%S.%f").timestamp()
+            except ValueError:
+                return np.nan
+
         for i, file in enumerate(files):
             with h5py.File(file, 'r') as run_datafile:
                 e = np.array(run_datafile['energy'][0,:-1])
-                t = np.array([datetime.strptime(str(t)[2:-1], r"%Y-%m-%d %H:%M:%S.%f").timestamp() for t in run_datafile['time']])
+                t = np.array([conv_time(t) for t in run_datafile['time']])
                 m = np.array(run_datafile['mu'])[:,:-1]
 
             if i == 0:
@@ -174,6 +181,11 @@ class XASData:
             return cls(times - times(0), energy, np.log(mu))
         else:
             return cls(times - times(0), energy, mu)
+        
+    def removeNan(self):
+        has_nan = np.isnan(self.absorption).any(axis=1)
+        self.absorption = self.absorption[~has_nan]
+        self.times = self.times[~has_nan]
         
     def validate(self):
         """Validate shapes on creation."""
