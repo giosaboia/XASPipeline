@@ -34,11 +34,11 @@ Rebinner:
   # plot: True # overwrite default plotting behaviour of module
   # name: Rebinner # overwrite default name of module
 
-# Merger:
-#   mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
-#   threshold: 0.025 # Value used in 'auto' mode to decide how much variation can be in one group
-#   plot: True # overwrite default plotting behaviour of module
-#   # name: Merger # overwrite default name of module
+Merger:
+  mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
+  threshold: 0.025 # Value used in 'auto' mode to decide how much variation can be in one group
+  plot: True # overwrite default plotting behaviour of module
+  # name: Merger # overwrite default name of module
 
 # SVDDecompositor:
 #   mode: "n_comp" # decide to use threshold or n_comp cutoff
@@ -46,16 +46,16 @@ Rebinner:
 #   n_comp: 2 # Number of svd components used when mode is 'n_comp'
 #   name: SVDDecompositor # overwrite default name of module
 
-EdgeLC:
-  # pre: None
-  # post: None
-  refs: # Reference Spectra either passed by index in data array or by path of norm file
-    - 0
-    - -1
-  # name: EdgeLC # overwrite default name of module
+# EdgeLC:
+#   # pre: None
+#   # post: None
+#   refs: # Reference Spectra either passed by index in data array or by path of norm file
+#     - 0
+#     - -1
+#   # name: EdgeLC # overwrite default name of module
 
-# EdgeDiffPlotter
-  # name: EdgeDiffPlotter # overwrite default name of module
+# # EdgeDiffPlotter
+#   # name: EdgeDiffPlotter # overwrite default name of module
 
 Plotter:
   diff: True # Show to difference to the reference or show plain data

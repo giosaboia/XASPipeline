@@ -25,6 +25,8 @@ def k2deltaE(k):
 def abs2AthenaRep(val: float) -> str:
     if val > 0.1:
         return " %.8f" %val
+    else:
+        return " %17.10E" %val
     
     bits = struct.unpack('<Q', struct.pack('<d', val))[0]
 
@@ -196,9 +198,25 @@ class XASData:
         
         if arr.size == 0:
             raise ValueError(f"Field '{name}' cannot be empty.")
+    
+    def toNORMind(self, path:pathlib.Path, name: str, para:XASPara, comment:str|None):
+        for i in range(len(self.times)):
+            with open(path / (f"{name}_{i:04d}.norm"), 'w') as f:
+                f.write(f"# XAS Data processed by XASPipeline\n# Shape: (1, {len(self.energies)})\n")
+                if comment is not None:
+                    f.write("# " + comment + "\n")
+                f.write(f"# Element.edge:                  {para.edge}\n")
+                f.write(f"# Element.symbol:                {para.element}\n")
+                f.write(f"# Column.1:                      energy eV\n")
+                f.write(f"# Column.2:                      {int(self.times[i])}\n")
+                f.write("# ///\n#------------------------\n")
+                f.write("# "+"".join(["%-17s" %"e", "%-17s" %f"norm{(self.times[i])}"]) + "\n")
+                for energy, abs_vals in zip(self.energies, self.absorption[i].T):
+                    line_elements = [f" {energy:10.4f}    ", abs2AthenaRep(abs_vals)]
+                    f.write("".join(line_elements) + "\n")
         
-    def toNORM(self, path:pathlib.Path, para:XASPara, comment:str|None):
-        with open(path, 'w') as f:
+    def toNORM(self, path:pathlib.Path, name: str, para:XASPara, comment:str|None, mode:str):
+        with open(path / (name + ".norm"), 'w') as f:
             f.write(f"# XAS Data processed by XASPipeline\n# Shape: ({len(self.times)}, {len(self.energies)})\n")
             if comment is not None:
                 f.write("# " + comment + "\n")
@@ -727,6 +745,7 @@ class Exporter(Analyzer):
     """
     path: pathlib.Path
     exp_name: str
+    mode: Literal['combined', 'individual'] = 'individual'
     comment: Optional[str] = None
     
     # def model_post_init(self, context):
@@ -737,9 +756,11 @@ class Exporter(Analyzer):
     #         self.export_name = self.para.name
 
     def _analyse(self):
-        name = self.exp_name + ".norm"
-        self._data.toNORM(self.path / name, self.para, self.comment)
-        self.logger.info(f"Exported Data to '{self.path / name}'")
+        if self.mode == 'combined':
+            self._data.toNORM(self.path, self.exp_name, self.para, self.comment)
+        else:
+            self._data.toNORMind(self.path, self.exp_name, self.para, self.comment)
+        self.logger.info(f"Exported Data in '{self.path}' with name '{self.name}'")
 #endregion
 
 PREPROCESSORS = {cls.__name__: cls for cls in Preprocessor.__subclasses__()}
