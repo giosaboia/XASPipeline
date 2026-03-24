@@ -134,14 +134,14 @@ class XASData:
     def extract_data_hdf5(cls, logger: logging.Logger, files: list[pathlib.Path]):
         def conv_time(date_str: str):
             try:
-                return datetime.strptime(str(t)[2:-1], r"%Y-%m-%d %H:%M:%S.%f").timestamp()
+                return datetime.strptime(date_str, r"%Y-%m-%d %H:%M:%S.%f").timestamp()
             except ValueError:
                 return np.nan
 
         for i, file in enumerate(files):
             with h5py.File(file, 'r') as run_datafile:
                 e = np.array(run_datafile['energy'][0,:-1])
-                t = np.array([conv_time(t) for t in run_datafile['time']])
+                t = np.array([conv_time(str(t)[2:-1]) for t in run_datafile['time']])
                 m = np.array(run_datafile['mu'])[:,:-1]
 
             if i == 0:
