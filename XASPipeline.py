@@ -1,5 +1,5 @@
 
-import argparse, h5py, inspect, logging, pathlib, struct, sys, time, yaml
+import argparse, h5py, inspect, logging, pathlib, os, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -760,6 +760,7 @@ class Exporter(Analyzer):
         export_name (str): Name of the file (without .csv). By default the name of the first input file will be used.
     """
     path: pathlib.Path
+    subfolder: bool = False
     exp_name: str
     mode: Literal['combined', 'individual'] = 'individual'
     comment: Optional[str] = None
@@ -772,11 +773,16 @@ class Exporter(Analyzer):
     #         self.export_name = self.para.name
 
     def _analyse(self):
+        if self.subfolder:
+            self.path = self.path / self.exp_name
+        if not self.path.exists():
+            os.makedirs(self.path)
+
         if self.mode == 'combined':
             self._data.toNORM(self.path, self.exp_name, self.para, self.comment)
         else:
             self._data.toNORMind(self.path, self.exp_name, self.para, self.comment)
-        self.logger.info(f"Exported Data in '{self.path}' with name '{self.name}'")
+        self.logger.info(f"Exported Data in '{self.path}' with name '{self.exp_name}'")
 #endregion
 
 PREPROCESSORS = {cls.__name__: cls for cls in Preprocessor.__subclasses__()}
