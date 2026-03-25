@@ -73,8 +73,8 @@ def readNorm(file_path: pathlib.Path, useCol: int | str = "flat") -> tuple[np.nd
                         useCol = 1
                     startReadout = True
                 words = l.split()
-                energies.append(words[0])
-                absorption.append(words[useCol])
+                energies.append(float(words[0]))
+                absorption.append([float(w) for w in words[useCol]])
         
     return np.array(energies), np.array(absorption)
 
