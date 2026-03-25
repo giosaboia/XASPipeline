@@ -691,7 +691,7 @@ class EdgeLC(Analyzer):
         cum_coeffs = np.cumsum(coeffs,axis=1)
         width = np.min(np.diff(self._data.times))
         for i in reversed(range(len(self.refs))):
-            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=width)
+            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=width, color=f"C{i}")
         ax2.legend(loc="upper center", ncols=3)
         ax2.set_ylim(0,1)
         ax2.set_xlim(0,self._data.times[-1])
