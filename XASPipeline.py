@@ -72,10 +72,11 @@ def readNorm(file_path: pathlib.Path, useCol: int | str = "flat") -> tuple[np.nd
                     except ValueError:
                         useCol = 1
                     startReadout = True
+
                 words = l.split()
                 energies.append(float(words[0]))
-                absorption.append([float(w) for w in words[useCol]])
-        
+                absorption.append(float(words[useCol]))
+
     return np.array(energies), np.array(absorption)
 
 #region dataclass
@@ -294,11 +295,11 @@ class XASRef(BaseModel):
             [target_energy[-1] + (target_energy[-1] - target_energy[-2]) / 2]
         ])
 
-        cum_integral = sp.integrate.cumulative_trapezoid(self.source_mu, x = self.source_e)
+        cum_integral = sp.integrate.cumulative_trapezoid(self.source_mu, x = self.source_e, initial=0)
         resampled_integral = np.interp(edges, self.source_e, cum_integral)
         return np.diff(resampled_integral) / np.diff(edges)
 
-def str2Ref(x: Any) -> Any:
+def str2Ref(x: Any) -> XASRef:
     return XASRef.from_norm(pathlib.Path(x)) if isinstance(x, (str,pathlib.Path)) else x
 
 #region PipelineContex
@@ -688,9 +689,12 @@ class EdgeLC(Analyzer):
         ax1.legend(loc="upper center", ncols=3)
 
         cum_coeffs = np.cumsum(coeffs,axis=1)
+        width = np.min(np.diff(self._data.times))
         for i in reversed(range(len(self.refs))):
-            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=10)
+            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=width)
         ax2.legend(loc="upper center", ncols=3)
+        ax2.set_ylim(0,1)
+        ax2.set_xlim(0,self._data.times[-1])
 
 
 class Plotter(Analyzer):
