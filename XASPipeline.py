@@ -267,21 +267,21 @@ class XASData:
 class XASRef(BaseModel):
     mu: Optional[np.ndarray] = None
     name: str
-    _source_e: Optional[np.ndarray] = None
-    _source_mu: Optional[np.ndarray] = None
+    source_e: Optional[np.ndarray] = None
+    source_mu: Optional[np.ndarray] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
     def from_norm(cls, path: pathlib.Path) -> "XASRef":
         name = path.stem
         energy, mu = readNorm(path)
-        return cls(name = name, _source_e = energy, _source_mu = mu)
+        return cls(name = name, source_e = energy, source_mu = mu)
 
     def resample(self, target_energy: np.ndarray):
         if self.mu is not None:
             if len(self.mu) == len(target_energy):
                 return
-        if self._source_e is not None and self._source_mu is not None:
+        if self.source_e is not None and self.source_mu is not None:
             self.mu = self._rebin(target_energy)
         else:
             raise ValueError("XASRef has not data and no source to resample from!")
@@ -294,8 +294,8 @@ class XASRef(BaseModel):
             [target_energy[-1] + (target_energy[-1] - target_energy[-2]) / 2]
         ])
 
-        cum_integral = sp.integrate.cumulative_trapezoid(self._source_mu, x = self._source_e)
-        resampled_integral = np.interp(edges, self._source_e, cum_integral)
+        cum_integral = sp.integrate.cumulative_trapezoid(self.source_mu, x = self.source_e)
+        resampled_integral = np.interp(edges, self.source_e, cum_integral)
         return np.diff(resampled_integral) / np.diff(edges)
 
 def str2Ref(x: Any) -> Any:
