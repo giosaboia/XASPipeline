@@ -730,7 +730,7 @@ class EdgeLC(Analyzer):
         ax2.set_xlim(0, self._data.times[-1]/60)
         ax2.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
         ax2.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
-        ax2.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax2.set_ylabel(ylabel = "Weight", labelpad = 10, fontsize = 16)
         ax2.xaxis.set_major_locator(MultipleLocator(30))
         ax2.tick_params(length = 8, width = 1, labelsize = 14)
         
@@ -742,9 +742,9 @@ class Plotter(Analyzer):
     k_order: int = 2
     def _analyse(self):
         if self._data.normalized:
-            fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
+            fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,12), layout="tight", width_ratios=(1,1))
         else:
-            fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,4), layout="tight", width_ratios=(1,1))
+            fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,12), layout="tight", width_ratios=(1,1))
         fig.suptitle(f"Analyzer {self.name}")
 
         step = max(int(len(self._data.times)/20), 1)
@@ -753,27 +753,42 @@ class Plotter(Analyzer):
             axul.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
         axul.legend(frameon=False, loc="lower right", ncols=2)
         axul.set_xlim(*self._data.energies[[0, -1]])
+        axul.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
+        axul.set_ylabel("Absorption", fontsize = 16, labelpad = 10)
+        axul.tick_params(axis = "both", labelsize = 14)
 
-        X, Y = np.meshgrid(self._data.energies, self._data.times)
+        X, Y = np.meshgrid(self._data.energies, self._data.times/60)
         if self.diff:
             mean = np.mean(self._data.absorption, axis=0)
-            axur.pcolormesh(X, Y, self._data.absorption-mean, cmap="plasma", shading="auto")
+            axur.pcolormesh(X, Y, self._data.absorption-mean, cmap="copper", shading="gouraud")
         else:
-            axur.pcolormesh(X, Y, self._data.absorption, cmap="plasma", shading="auto")
+            axur.pcolormesh(X, Y, self._data.absorption, cmap="copper", shading="gouraud")
+        axur.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
+        axur.set_ylabel("Time on Stream (min)", fontsize = 16, labelpad = 10)
+        axur.tick_params(axis = "both", labelsize = 14)
 
         if self._data.normalized:
             k, k_abs = self._data.genKspace(self.para.edge_pos)
             for i, spectra in enumerate(k_abs[::step, :]):
                 axll.plot(k, (spectra - 1) * k**self.k_order)
             axll.axhline(0, ls="dotted", c="black")
+            axll.set_xlabel("k (Å⁻¹)", fontsize = 16, labelpad = 10)
+            axll.set_ylabel("k³χ(k)", fontsize = 16, labelpad = 10)
+            axll.tick_params(axis = "both", labelsize = 14)
+            axll.set_xlim(0, 12)
 
-            X, Y = np.meshgrid(k, self._data.times)
+            X, Y = np.meshgrid(k, self._data.times/60)
             k_scal = k**self.k_order
             if self.diff:
                 mean = np.mean(k_abs * k_scal, axis=0)
-                axlr.pcolormesh(X, Y, k_abs * k_scal - mean, cmap="plasma", shading="auto")
+                axlr.pcolormesh(X, Y, k_abs * k_scal - mean, cmap="copper", shading="gouraud")
             else:
-                axlr.pcolormesh(X, Y, (k_abs-1) * k_scal, cmap="plasma", shading="auto")
+                axlr.pcolormesh(X, Y, (k_abs-1) * k_scal, cmap="copper", shading="gouraud")
+            axlr.set_xlabel("k (Å⁻¹)", fontsize = 16, labelpad = 10)
+            axlr.set_ylabel("Time on Stream (min)", fontsize = 16, labelpad = 10)
+            axlr.tick_params(axis = "both", labelsize = 14)
+            axlr.set_xlim(0, 12)
+
 
         axul.axhline(1)
         for e in (val for val in self.para.pre_edge_range if val is not None):
