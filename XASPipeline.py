@@ -710,10 +710,19 @@ class EdgeLC(Analyzer):
         ax1.tick_params(length = 8, width = 1, labelsize = 14)
 
         cum_coeffs = np.cumsum(coeffs, axis=1)
+        hatch_patterns = ['..', '\\', '++', '//']
         width = np.min(np.diff(self._data.times))
         for i in reversed(range(len(self.refs))):
             color = self.refs[i].color
-            ax2.bar(self._data.times, cum_coeffs[:, i], label=self.refs[i].name, width=width, color=color)
+            hatch = hatch_patterns[i % len(hatch_patterns)]
+            ax2.fill_between(self._data.times,
+                             cum_coeffs[:, i],
+                             label=self.refs[i].name,
+                             color=color,
+                             hatch=hatch,
+                             edgecolor="black",
+                             linewidth=0.5,
+                             )
         ax2.set_ylim(0, 1)
         ax2.set_xlim(0, self._data.times[-1])
         ax2.legend(loc = "upper center", frameon = False, ncols = 3)
