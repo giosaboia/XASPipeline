@@ -272,10 +272,12 @@ class XASRef(BaseModel):
     source_e: Optional[np.ndarray] = None
     source_mu: Optional[np.ndarray] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    color: Optional[str] = None
 
     @classmethod
     def from_norm(cls, path: pathlib.Path) -> "XASRef":
         name = path.stem
+        name = name.split('_')[0]
         energy, mu = readNorm(path)
         return cls(name = name, source_e = energy, source_mu = mu)
 
@@ -301,7 +303,13 @@ class XASRef(BaseModel):
         return np.diff(resampled_integral) / np.diff(edges)
 
 def str2Ref(x: Any) -> XASRef:
-    return XASRef.from_norm(pathlib.Path(x)) if isinstance(x, (str,pathlib.Path)) else x
+    if isinstance(x, tuple):
+        path, color = x
+        ref = XASRef.from_norm(pathlib.Path(path))
+        ref.color = color  # Add a color attribute to the XASRef object
+        return ref
+    else:
+        return XASRef.from_norm(pathlib.Path(x)) if isinstance(x, (str, pathlib.Path)) else x
 
 #region PipelineContex
 class PipelineContext(BaseModel):
@@ -643,7 +651,8 @@ class SVDDecompositor(Analyzer):
 class EdgeLC(Analyzer):
     pre: float = None
     post: float = None
-    refs: list[Annotated[XASRef, BeforeValidator(str2Ref)]| int] = [0, -1]
+    refs: list[Annotated[XASRef, BeforeValidator(str2Ref)] | int | tuple] = [0, -1]
+
     def _analyse(self):
         weight = 1000
         if isinstance(self.pre, type(None)):
@@ -652,16 +661,21 @@ class EdgeLC(Analyzer):
             self.post = self.para._post_edge_range[0]
         e_slice = self._data.energyRange2idx(self.para.edge_pos + self.pre, self.para.edge_pos + self.post)
 
+        ref_objects = []
         for i, r in enumerate(self.refs):
             if isinstance(r, int):
-                self.refs[i] = XASRef(mu = self._data.absorption[r,e_slice], name = f"Ref{i}")
+                ref_objects.append(XASRef(mu=self._data.absorption[r, e_slice], name=f"Ref{i}"))
             else:
-                r.resample(self._data.energies[e_slice])
-        
-        mu = np.append(self._data.absorption[:,e_slice], np.full((len(self._data.times), 1), weight), axis=1)
+                ref = str2Ref(r)  # Ensure conversion to XASRef
+                ref.resample(self._data.energies[e_slice])
+                ref_objects.append(ref)
+
+        self.refs = ref_objects
+        mu = np.append(self._data.absorption[:, e_slice], np.full((len(self._data.times), 1), weight), axis=1)
         refs = np.column_stack([np.append(r.mu, [weight]) for r in self.refs])
 
         coeffs = np.ones((len(self._data.times), len(self.refs)))
+
         def fit_nnls(t_idx):
             coeffs[t_idx], _ = sp.optimize.nnls(refs, mu[t_idx])
 
@@ -683,19 +697,30 @@ class EdgeLC(Analyzer):
 
         #     results[t_idx] = minimize(obj, paras, method="leastsq")
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         fig.suptitle(f"Analyzer {self.name}")
         for i in range(len(self.refs)):
-            ax1.plot(self._data.times, coeffs[:,i], label = self.refs[i].name)
-        ax1.legend(loc="upper center", ncols=3)
+            color = self.refs[i].color
+            ax1.plot(self._data.times, coeffs[:, i], label=self.refs[i].name, color=color)
+        ax1.set_xlim(0, self._data.times[-1])
+        ax1.set_ylim(-0.01, 1.01)
+        ax1.legend(loc = "upper center", frameon = False, ncols = 3)
+        ax1.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
+        ax1.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax1.tick_params(length = 8, width = 1, labelsize = 14)
 
-        cum_coeffs = np.cumsum(coeffs,axis=1)
+        cum_coeffs = np.cumsum(coeffs, axis=1)
         width = np.min(np.diff(self._data.times))
         for i in reversed(range(len(self.refs))):
-            ax2.bar(self._data.times, cum_coeffs[:,i], label = self.refs[i].name, width=width)
-        ax2.legend(loc="upper center", ncols=3)
-        ax2.set_ylim(0,1)
-        ax2.set_xlim(0,self._data.times[-1])
+            color = self.refs[i].color
+            ax2.bar(self._data.times, cum_coeffs[:, i], label=self.refs[i].name, width=width, color=color)
+        ax2.set_ylim(0, 1)
+        ax2.set_xlim(0, self._data.times[-1])
+        ax2.legend(loc = "upper center", frameon = False, ncols = 3)
+        ax2.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
+        ax2.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax2.tick_params(length = 8, width = 1, labelsize = 14)
+        
 
 
 class Plotter(Analyzer):
