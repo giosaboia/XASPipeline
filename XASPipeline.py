@@ -11,6 +11,7 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from matplotlib import colormaps
+from matplotlib.ticker import MultipleLocator
 from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, BeforeValidator
 from lmfit import Parameters, minimize, report_fit
@@ -701,33 +702,36 @@ class EdgeLC(Analyzer):
         fig.suptitle(f"Analyzer {self.name}")
         for i in range(len(self.refs)):
             color = self.refs[i].color
-            ax1.plot(self._data.times, coeffs[:, i], label=self.refs[i].name, color=color)
-        ax1.set_xlim(0, self._data.times[-1])
+            ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name, color=color)
+        ax1.set_xlim(0, self._data.times[-1]/60)
         ax1.set_ylim(-0.01, 1.01)
-        ax1.legend(loc = "upper center", frameon = False, ncols = 3)
+        ax1.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
         ax1.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
         ax1.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax1.xaxis.set_major_locator(MultipleLocator(30))
         ax1.tick_params(length = 8, width = 1, labelsize = 14)
-
+        
         cum_coeffs = np.cumsum(coeffs, axis=1)
         hatch_patterns = ['..', '\\', '++', '//']
         width = np.min(np.diff(self._data.times))
         for i in reversed(range(len(self.refs))):
             color = self.refs[i].color
             hatch = hatch_patterns[i % len(hatch_patterns)]
-            ax2.fill_between(self._data.times,
+            ax2.fill_between(self._data.times/60,
                              cum_coeffs[:, i],
                              label=self.refs[i].name,
                              color=color,
                              hatch=hatch,
+                             alpha=0.9,
                              edgecolor="black",
-                             linewidth=0.5,
+                             linewidth=0.1,
                              )
         ax2.set_ylim(0, 1)
-        ax2.set_xlim(0, self._data.times[-1])
-        ax2.legend(loc = "upper center", frameon = False, ncols = 3)
+        ax2.set_xlim(0, self._data.times[-1]/60)
+        ax2.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
         ax2.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
         ax2.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax2.xaxis.set_major_locator(MultipleLocator(30))
         ax2.tick_params(length = 8, width = 1, labelsize = 14)
         
 
