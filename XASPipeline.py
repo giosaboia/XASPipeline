@@ -376,23 +376,18 @@ class Normalizer(Preprocessor):
         pre_edge_slice = self._data.energyRange2idx(*self.para.pre_edge_range)
         post_edge_slice = self._data.energyRange2idx(*self.para.post_edge_range)
 
-        self._pre_edge_coeff, residual, rank, s = np.linalg.lstsq(
-            np.column_stack([self._data.energies[pre_edge_slice], np.ones_like(self._data.energies[pre_edge_slice])]),
-            self._data.absorption[:,pre_edge_slice].T
-        )
-        pre_edge_fit = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff).T
+        A = np.vander(self._data.energies, 2)
+        self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self._data.absorption[:,pre_edge_slice].T)
+        pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
         self._data.absorption -= pre_edge_fit
 
-        self._post_edge_coeff, residual, rank, s = np.linalg.lstsq(
-            np.vander(self._data.energies[post_edge_slice], self.post_order + 1),
-            self._data.absorption[:,post_edge_slice].T
-        )
-        self._post_edge_fit = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff).T
+        A =  np.vander(self._data.energies, self.post_order + 1)
+        self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self._data.absorption[:,post_edge_slice].T)
+        self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
         self._data.absorption /= self._post_edge_fit
+
         rows_with_neg = (self._post_edge_fit < 0).any(axis=1)
-
         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self._data.times)} due to negative values in post_line spline")
-
         self._data.absorption = self._data.absorption[~rows_with_neg]
         self._data.times = self._data.times[~rows_with_neg]
         self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
