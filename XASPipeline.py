@@ -14,8 +14,9 @@ from matplotlib import colormaps
 from matplotlib.widgets import Slider
 from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, BeforeValidator
+from pydantic.fields import FieldInfo
 from lmfit import Parameters, minimize, report_fit
-from typing import Annotated, ClassVar, Literal, Optional, Any
+from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args
 
 
 def deltaE2k(deltaE):
@@ -316,16 +317,62 @@ class Processor(BaseModel):
 
     @classmethod
     def with_context(cls, data: dict, context: PipelineContext):
-        for field_name in cls.model_fields:
-            if field_name not in data and hasattr(context, field_name):
-                val = getattr(context, field_name)
-                if val is not None:
-                    data[field_name] = val
+        for field_name, field_info in cls.model_fields.items():
+            if field_name in data:
+                data[field_name] = cls._resolve_paths(field_info.annotation, data[field_name], context.path)
+            else:
+                val = getattr(context, field_name, None)
+                if val is None:
+                    continue
+
+                data[field_name] = val
 
         if data.get("name") is None:
             data["name"] = cls.__name__
 
         return cls.model_validate(data)
+    
+    @staticmethod
+    def _resolve_paths(annotation: type, val: any, base_path: pathlib.Path) -> any:
+        origin = get_origin(annotation)
+        if origin is Annotated:
+            return Processor._resolve_paths(get_args(annotation)[0], val, base_path)
+        
+        if origin is Union:
+            for sub_type in get_args(annotation):
+                resolved = Processor._resolve_paths(sub_type, val, base_path)
+                if resolved != val:
+                    return resolved
+            return val
+            
+        if origin is list:
+            if not isinstance(val, list):
+                return val
+            else:
+                return [Processor._resolve_paths(get_args(annotation)[0], item, base_path) for item in val]
+        
+        if isinstance(val, str) and Processor._is_path_type(annotation):
+            return Processor._resolve_relative_paths(val, base_path)
+
+        return val
+
+    @staticmethod
+    def _is_path_type(tpl: any) -> bool:
+        path_types = (pathlib.Path, XASRef)
+        try:
+            if get_origin(tpl) is Annotated:
+                tpl = get_args(tpl)[0]
+            return isinstance(tpl, type) and issubclass(tpl, path_types)
+        except TypeError:
+            return False
+        
+    @staticmethod
+    def _resolve_relative_paths(val: str, base_path: pathlib.Path) -> pathlib.Path:
+        val_path = pathlib.Path(val)
+        if val_path.is_absolute():
+            return val_path
+        else:
+            return base_path / val_path
 #endregion
 
 #region Preprocessors
@@ -620,6 +667,8 @@ class Merger(Preprocessor):
                 return self._merge_auto()
     
     def _plot(self):
+        if self.mode != "auto":
+            return
         plt.subplots()
         plt.title(f"Preprocessor {self.name}")
         for t,g in zip(self._times, self._groups):
@@ -629,7 +678,7 @@ class Merger(Preprocessor):
 #region Analyser
 class Analyzer(Processor):
 
-    def analyse(self, data: XASData) -> XASData:
+    def analyse(self, data: XASData):
         self._data = data
         self.logger.info(f"Analyzer {self.name} started")
         self._analyse()

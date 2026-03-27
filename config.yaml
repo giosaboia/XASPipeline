@@ -64,7 +64,7 @@ Plotter:
   # name: Plotter # overwrite default name of module
 
 Exporter:
-  path: "C:\\Users\\loesekej\\Desktop\\zwischenspeicher" # Path where output is stored
+  path: "..\\test_Exports" # Path where output is stored
   subfolder: True # create a subfolder with name exp_name in the export path (default: False)
   # exp_name: "someName" # name of output file. If not provided will use the exp_name passed in command line or in the global block
   # comment: "lololololol" # Additional comment printed in output file
