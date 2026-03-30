@@ -1,8 +1,9 @@
 # Hey Jannik
 
-import argparse, h5py, inspect, logging, pathlib, struct, sys, time, yaml
+import argparse, h5py, inspect, logging, pathlib, os, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
+
 import numpy as np
 import numpy.typing as npt
 import scipy as sp
@@ -12,10 +13,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from matplotlib import colormaps
 from matplotlib.ticker import MultipleLocator
+from matplotlib.widgets import Slider
 from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, BeforeValidator
+from pydantic.fields import FieldInfo
 from lmfit import Parameters, minimize, report_fit
-from typing import Annotated, ClassVar, Literal, Optional, Any
+from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args
 
 
 def deltaE2k(deltaE):
@@ -29,15 +32,6 @@ def abs2AthenaRep(val: float) -> str:
         return " %.8f" %val
     else:
         return " %17.10E" %val
-    
-    bits = struct.unpack('<Q', struct.pack('<d', val))[0]
-
-    sign = (bits >> 63) & 1
-    exponent = (bits >> 52) & 0x7FF
-    mantissa = bits & 0xFFFFFFFFFFFFF
-
-    sign = "-" if sign else " "
-    return f"  {sign}0.{str(mantissa)[:8]}E{(exponent-1022):03}"
 
 def readDatCols(logger, file_path, cols) -> np.array:
     logger.info(f"Reading {file_path}")
@@ -333,16 +327,62 @@ class Processor(BaseModel):
 
     @classmethod
     def with_context(cls, data: dict, context: PipelineContext):
-        for field_name in cls.model_fields:
-            if field_name not in data and hasattr(context, field_name):
-                val = getattr(context, field_name)
-                if val is not None:
-                    data[field_name] = val
+        for field_name, field_info in cls.model_fields.items():
+            if field_name in data:
+                data[field_name] = cls._resolve_paths(field_info.annotation, data[field_name], context.path)
+            else:
+                val = getattr(context, field_name, None)
+                if val is None:
+                    continue
+
+                data[field_name] = val
 
         if data.get("name") is None:
             data["name"] = cls.__name__
 
         return cls.model_validate(data)
+    
+    @staticmethod
+    def _resolve_paths(annotation: type, val: any, base_path: pathlib.Path) -> any:
+        origin = get_origin(annotation)
+        if origin is Annotated:
+            return Processor._resolve_paths(get_args(annotation)[0], val, base_path)
+        
+        if origin is Union:
+            for sub_type in get_args(annotation):
+                resolved = Processor._resolve_paths(sub_type, val, base_path)
+                if resolved != val:
+                    return resolved
+            return val
+            
+        if origin is list:
+            if not isinstance(val, list):
+                return val
+            else:
+                return [Processor._resolve_paths(get_args(annotation)[0], item, base_path) for item in val]
+        
+        if isinstance(val, str) and Processor._is_path_type(annotation):
+            return Processor._resolve_relative_paths(val, base_path)
+
+        return val
+
+    @staticmethod
+    def _is_path_type(tpl: any) -> bool:
+        path_types = (pathlib.Path, XASRef)
+        try:
+            if get_origin(tpl) is Annotated:
+                tpl = get_args(tpl)[0]
+            return isinstance(tpl, type) and issubclass(tpl, path_types)
+        except TypeError:
+            return False
+        
+    @staticmethod
+    def _resolve_relative_paths(val: str, base_path: pathlib.Path) -> pathlib.Path:
+        val_path = pathlib.Path(val)
+        if val_path.is_absolute():
+            return val_path
+        else:
+            return base_path / val_path
 #endregion
 
 #region Preprocessors
@@ -387,42 +427,79 @@ class Normalizer(Preprocessor):
         post_order (int): Polynom-order of the post_edge_line fit (Default: 3)
     """
     post_order: int = 3
+    _pre_edge_coeff: np.ndarray = PrivateAttr(None)
+    _post_edge_coeff: np.ndarray = PrivateAttr(None)
     def _transform(self) -> None:
         pre_edge_slice = self._data.energyRange2idx(*self.para.pre_edge_range)
         post_edge_slice = self._data.energyRange2idx(*self.para.post_edge_range)
 
-        coeffs, residual, rank, s = np.linalg.lstsq(
-            np.column_stack([self._data.energies[pre_edge_slice], np.ones_like(self._data.energies[pre_edge_slice])]),
-            self._data.absorption[:,pre_edge_slice].T
-        )
-        pre_cor = np.outer(coeffs[0], self._data.energies) + coeffs[1][:,None]
-        self._data.absorption -= pre_cor
+        A = np.vander(self._data.energies, 2)
+        self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self._data.absorption[:,pre_edge_slice].T)
+        pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
+        self._data.absorption -= pre_edge_fit
 
-        coeffs, residual, rank, s = np.linalg.lstsq(
-            np.vander(self._data.energies[post_edge_slice], self.post_order + 1),
-            self._data.absorption[:,post_edge_slice].T
-        )
-        post_cor = np.dot(np.vander(self._data.energies, self.post_order + 1), coeffs).T
-        self._data.absorption /= post_cor
-        rows_with_neg = (post_cor < 0).any(axis=1)
+        A =  np.vander(self._data.energies, self.post_order + 1)
+        self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self._data.absorption[:,post_edge_slice].T)
+        self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
+        self._data.absorption /= self._post_edge_fit
 
+        rows_with_neg = (self._post_edge_fit < 0).any(axis=1)
         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self._data.times)} due to negative values in post_line spline")
         self._data.absorption = self._data.absorption[~rows_with_neg]
         self._data.times = self._data.times[~rows_with_neg]
+        self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
+        self._post_edge_coeff = self._post_edge_coeff[:,~rows_with_neg]
+
         self._data.normalized = True 
 
     def _plot(self) -> None:
         fig, ax = plt.subplots(figsize=(8,4))
-        step = max(int(len(self._data.times)/20), 1)
-        for i in range(0,len(self._data.times),step):
-            ax.plot(self._data.energies, self._data.absorption[i])
-        
-        ax.axhline(1)
+        plt.subplots_adjust(bottom=0.25)
+
+        idx0 = 0
+        pre_edge = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff[:,idx0]).T
+        post_edge = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff[:,idx0]).T
+
+        data_line, = ax.plot(self._data.energies, self._data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self._data.times[idx0]}')
+        pre_line, = ax.plot(self._data.energies, pre_edge, ls="dashed", c="grey")
+        post_line, = ax.plot(self._data.energies, post_edge + pre_edge, ls="dashed", c="grey")
+
         for e in (val for val in self.para.pre_edge_range if val is not None):
-            ax.axvline(e, ls="dashed", color="grey")
+            plt.axvline(e, ls="dashed", color="grey")
         for e in (val for val in self.para.post_edge_range if val is not None):
-            ax.axvline(e, ls="dashed", color="grey")
+            plt.axvline(e, ls="dashed", color="grey")
+
+        ax_slider = plt.axes([0.2, 0.1, 0.65, 0.03])
+        slider = Slider(ax_slider, 'Timepoint', 0, self._data.times.shape[0]-1, 
+                        valinit=idx0, valfmt='%d')
+
+        def update(val):
+            idx = int(slider.val)
+            pre_edge = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff[:,idx]).T
+            post_edge = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff[:,idx]).T
+
+            data_line.set_ydata(self._data.absorption[idx] * post_edge + pre_edge)
+            data_line.set_label(f'mu @ {self._data.times[idx]}')
+            pre_line.set_ydata(pre_edge)
+            post_line.set_ydata(post_edge + pre_edge)
+            fig.canvas.draw_idle()
+        
+        slider.on_changed(update)
+
+        plt.legend()
         plt.show()
+
+
+        # step = max(int(len(self._data.times)/20), 1)
+        # for i in range(0,len(self._data.times),step):
+        #     ax.plot(self._data.energies, self._data.absorption[i])
+        
+        # ax.axhline(1)
+        # for e in (val for val in self.para.pre_edge_range if val is not None):
+        #     ax.axvline(e, ls="dashed", color="grey")
+        # for e in (val for val in self.para.post_edge_range if val is not None):
+        #     ax.axvline(e, ls="dashed", color="grey")
+        # plt.show()
 
 
 class NoiseFilter(Preprocessor):
@@ -600,18 +677,18 @@ class Merger(Preprocessor):
                 return self._merge_auto()
     
     def _plot(self):
+        if self.mode != "auto":
+            return
         plt.subplots()
         plt.title(f"Preprocessor {self.name}")
         for t,g in zip(self._times, self._groups):
             plt.axvline(t, c=f"C{g}")
-        # for i, g in enumerate(self._groups):
-        #     plt.axvline(i, c=f"C{g}")
 #endregion
 
 #region Analyser
 class Analyzer(Processor):
 
-    def analyse(self, data: XASData) -> XASData:
+    def analyse(self, data: XASData):
         self._data = data
         self.logger.info(f"Analyzer {self.name} started")
         self._analyse()
@@ -683,20 +760,6 @@ class EdgeLC(Analyzer):
         with ThreadPool(processes=8) as pool:
             pool.map(fit_nnls, range(len(self._data.times)))
 
-        # paras = Parameters()
-        # for r in self.refs[:-1]:
-        #     paras.add(r.name.replace(" ", "_"), value = 1/len(self.refs), min = 0, max = 1)
-        # paras.add(r.name, value = 1/len(self.refs), min = 0, max = 1, expr=f"1 - ({" + ".join(paras.keys())})")
-
-        # results = [None for _ in self._data.times]
-        # mu_refs = [r.mu for r in self.refs]
-
-        # def fit_tp(t_idx):
-        #     local_paras = paras.copy()
-        #     def obj(p):
-        #         return np.dot([p[r.name] for r in self.refs], mu_refs) - mu[t_idx]
-
-        #     results[t_idx] = minimize(obj, paras, method="leastsq")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         fig.suptitle(f"Analyzer {self.name}")
@@ -814,23 +877,22 @@ class Exporter(Analyzer):
         export_name (str): Name of the file (without .csv). By default the name of the first input file will be used.
     """
     path: pathlib.Path
+    subfolder: bool = False
     exp_name: str
     mode: Literal['combined', 'individual'] = 'individual'
     comment: Optional[str] = None
-    
-    # def model_post_init(self, context):
-    #     super().model_post_init(context)
-    #     if self.export_path is None:
-    #         self.export_path = self.para.path
-    #     if self.export_name is None:
-    #         self.export_name = self.para.name
 
     def _analyse(self):
+        if self.subfolder:
+            self.path = self.path / self.exp_name
+        if not self.path.exists():
+            os.makedirs(self.path)
+
         if self.mode == 'combined':
             self._data.toNORM(self.path, self.exp_name, self.para, self.comment)
         else:
             self._data.toNORMind(self.path, self.exp_name, self.para, self.comment)
-        self.logger.info(f"Exported Data in '{self.path}' with name '{self.name}'")
+        self.logger.info(f"Exported Data in '{self.path}' with name '{self.exp_name}'")
 #endregion
 
 PREPROCESSORS = {cls.__name__: cls for cls in Preprocessor.__subclasses__()}

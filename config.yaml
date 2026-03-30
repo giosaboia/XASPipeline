@@ -11,7 +11,7 @@ global:
 
 Normalizer:
   post_order: 3
-  # plot: False # overwrite default plotting behaviour of module
+  plot: True # overwrite default plotting behaviour of module
   # name: Normalizer # overwrite default name of module
   
 NoiseFilter:
@@ -35,7 +35,7 @@ Rebinner:
   # name: Rebinner # overwrite default name of module
 
 Merger:
-  mode: "auto" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
+  mode: "manuel" # mode of Operation, can be 'all' (merge all spectra), 'auto' (decide grouping automatically) or 'manuel' (requires user input for grouping)
   threshold: 0.025 # Value used in 'auto' mode to decide how much variation can be in one group
   plot: True # overwrite default plotting behaviour of module
   # name: Merger # overwrite default name of module
@@ -64,8 +64,9 @@ Plotter:
   # name: Plotter # overwrite default name of module
 
 Exporter:
-  path: "C:\\Users\\loesekej\\Desktop\\zwischenspeicher" # Path where output is stored
-  # exp_name: someName # name of output file. If not provided will use the exp_name passed in command line or in the global block
+  path: "..\\test_Exports" # Path where output is stored
+  subfolder: True # create a subfolder with name exp_name in the export path (default: False)
+  # exp_name: "someName" # name of output file. If not provided will use the exp_name passed in command line or in the global block
   # comment: "lololololol" # Additional comment printed in output file
   # name: Exporter # overwrite default name of module
 
