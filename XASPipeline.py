@@ -443,16 +443,23 @@ class Normalizer(Preprocessor):
         self._data.normalized = True 
 
     def _plot(self) -> None:
-        fig, ax = plt.subplots(figsize=(8,4))
+        fig, (ax1, ax2) = plt.subplots(1,2,figsize=(12,6))
         plt.subplots_adjust(bottom=0.25)
 
         idx0 = 0
         pre_edge = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff[:,idx0]).T
         post_edge = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff[:,idx0]).T
 
-        data_line, = ax.plot(self._data.energies, self._data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self._data.times[idx0]}')
-        pre_line, = ax.plot(self._data.energies, pre_edge, ls="dashed", c="grey")
-        post_line, = ax.plot(self._data.energies, post_edge + pre_edge, ls="dashed", c="grey")
+        data_line, = ax1.plot(self._data.energies, self._data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self._data.times[idx0]}')
+        pre_line, = ax1.plot(self._data.energies, pre_edge, ls="dashed", c="grey")
+        post_line, = ax1.plot(self._data.energies, post_edge + pre_edge, ls="dashed", c="grey")
+        ax1.set_xlim(self._data.energies[0], self._data.energies[-1])
+
+        norm_line, = ax2.plot(self._data.energies, self._data.absorption[idx0])
+        ax2.axhline(1, ls="dotted", color="grey")
+        ax2.set_xlim(self._data.energies[0], self._data.energies[-1])
+        ax2.set_ylim(0, 1.5)
+
 
         for e in (val for val in self.para.pre_edge_range if val is not None):
             plt.axvline(e, ls="dashed", color="grey")
@@ -472,6 +479,8 @@ class Normalizer(Preprocessor):
             data_line.set_label(f'mu @ {self._data.times[idx]}')
             pre_line.set_ydata(pre_edge)
             post_line.set_ydata(post_edge + pre_edge)
+            norm_line.set_ydata(self._data.absorption[idx])
+
             fig.canvas.draw_idle()
         
         slider.on_changed(update)
