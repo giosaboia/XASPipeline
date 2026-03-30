@@ -919,6 +919,8 @@ def runPipeline(conf_path: pathlib.Path, cli_context: dict):
     logger.addHandler(console_handler)
 
     XAS = XASPipeline()
+    if not conf_path.is_absolute():
+        conf_path = pathlib.Path(__file__).parent.resolve() / conf_path
     with open(conf_path) as stream:
         try:
             config = yaml.safe_load(stream)
