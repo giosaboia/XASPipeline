@@ -10,7 +10,8 @@ global:
   plot: False
 
 Normalizer:
-  post_order: 3
+  pre: {Polynomial: {order: 1}}
+  post: {KSpline: {order: 3, weight: 3}}
   plot: True # overwrite default plotting behaviour of module
   # name: Normalizer # overwrite default name of module
   

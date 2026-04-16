@@ -1,4 +1,5 @@
 
+from numpy._typing import NDArray
 import argparse, h5py, inspect, logging, pathlib, os, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
@@ -7,7 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import scipy as sp
 
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from datetime import datetime
 from matplotlib import colormaps
@@ -16,6 +17,7 @@ from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from lmfit import Parameters, minimize, report_fit
 from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.optimize import leastsq
 from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args, cast
 
 
@@ -81,8 +83,8 @@ class XASPara:
             edge:str,
             element: str,
             edge_pos: float,
-            pre_edge_range: tuple[float, float],
-            post_edge_range: tuple[float, float]
+            pre_edge_range: tuple[float | None, float],
+            post_edge_range: tuple[float, float | None]
             ):
         self.edge = edge
         self.element = element
@@ -94,14 +96,14 @@ class XASPara:
         # self.name: str
 
     @property
-    def pre_edge_range(self) -> tuple[float, float]:
+    def pre_edge_range(self) -> tuple[float | None, float]:
         e1, e2 = self._pre_edge_range
-        return (self.edge_pos + e1, self.edge_pos + e2)
+        return (self.edge_pos + e1 if e1 is not None else None, self.edge_pos + e2)
 
     @property
-    def post_edge_range(self) -> tuple[float, float]:
+    def post_edge_range(self) -> tuple[float, float | None]:
         e1, e2 = self._post_edge_range
-        return (self.edge_pos + e1, self.edge_pos + e2)
+        return (self.edge_pos + e1, self.edge_pos + e2 if e2 is not None else None)
 
 @dataclass
 class XASData:
@@ -263,11 +265,11 @@ class XASData:
         
     def energyRange2idx(self, low, up) -> slice:        
         if isinstance(low, type(None)) & isinstance(up, type(None)):
-            return slice(0, -1)
+            return slice(0, None)
         elif isinstance(low, type(None)):
-            return slice(0, np.argmax(self.energies > up) -1)
+            return slice(0, np.argmax(self.energies > up), None)
         elif isinstance(up, type(None)):
-            return slice(np.argmax(self.energies > low), -1)
+            return slice(np.argmax(self.energies > low), None)
         
         if low > up:
             raise ValueError("energyRange2idx requires the low value to be smaller than the up value")
@@ -485,50 +487,176 @@ class Preprocessor(Processor):
         plt.legend(frameon=False, loc="lower right", ncols=2)
         plt.show()
 
+
+class BackgroundModel(BaseModel, ABC):
+    _fitted_params: Any = PrivateAttr(None)
+    @abstractmethod
+    def fit_transform(self, data: XASData, e_slice: slice,  e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        pass
+
+    @abstractmethod
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        pass
+
+    def mask(self, selection: Any):
+        assert self._fitted_params is not None, "Cannot mask before fitting."
+        
+        if isinstance(self._fitted_params, np.ndarray):
+            self._fitted_params = self._fitted_params[:,selection]
+        elif isinstance(self._fitted_params, list):
+            self._fitted_params = [item for i, item in enumerate(self._fitted_params) if selection[i]]
+
+    @model_validator(mode="before")
+    @classmethod
+    def match_class_name(cls, data: Any) -> Any:
+        if cls.__name__ not in data.keys():
+            raise ValueError(f"{cls} is not in {data.keys()}")
+        
+        return data[cls.__name__] or {}
+
+class Polynomial(BackgroundModel):
+    order: int = 3
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.vander(data.energies, self.order + 1)
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        return np.dot(A, self._fitted_params).T
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        assert self._fitted_params is not None, f"cant access Polynomial data without fit"
+        if spec_idx is None:
+            return np.dot(np.vander(energies, self.order + 1), self._fitted_params).T
+        else:
+            return np.dot(np.vander(energies, self.order + 1), self._fitted_params[:,spec_idx]).T
+        
+class Victoreen(BackgroundModel):
+    order: int = 3
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.column_stack([
+            (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * data.energies)) ** self.order, np.ones(len(data.energies))
+        ])
+
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        return np.dot(A, self._fitted_params).T
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.column_stack([
+            (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * energies)) ** self.order, np.ones(len(energies))
+        ])
+
+        assert self._fitted_params is not None; f"cant access Polynomial data without fit"
+        if spec_idx is None:
+            return np.dot(A, self._fitted_params).T
+        else:
+            return np.dot(A, self._fitted_params[:,spec_idx]).T
+
+class KSpline(BackgroundModel):
+    order: int = 3
+    weigth: int = 3
+    _e0_idx: Optional[npt.NDArray[np.integer]]
+    _e_slice: Optional[slice]
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        self._e0_idx = e0_idx
+        assert self._e0_idx is not None
+        self._e_slice = e_slice
+        eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+
+        self._fitted_params = []
+        fitted = np.zeros(data.absorption.shape)
+        for i in range(len(data.times)):
+            ks = np.sqrt((data.energies[e_slice] - data.energies[self._e0_idx[i]]) * eV2revA)
+            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+            self._fitted_params.append(sp.interpolate.make_lsq_spline(
+                ks, (data.absorption[i,e_slice] * (ks**self.weigth)),
+                knots, k = self.order
+            ))
+            fitted[i,e_slice] = self._fitted_params[i](ks) * (ks**(-self.weigth))
+            fitted[i,:e_slice.start] = fitted[i,e_slice.start]
+        
+        return fitted
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        assert self._fitted_params is not None, "Cannot transform before fitting."
+        assert self._e0_idx is not None
+        assert self._e_slice is not None
+        eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+
+        fitted = np.zeros((len(self._fitted_params),len(energies))) if spec_idx is None else np.zeros((1,len(energies)))
+        iterator = range(len(self._fitted_params)) if spec_idx is None else [spec_idx]
+        for j, i in enumerate(iterator):
+            ks = np.sqrt((energies[self._e_slice] - energies[self._e0_idx[i]]) * eV2revA)
+            fitted[j,self._e_slice] = self._fitted_params[i](ks) * (ks**(-self.weigth))
+            fitted[j,:self._e_slice.start] = fitted[j,self._e_slice.start]
+        
+        if spec_idx is None:
+            return fitted
+        else:
+            return fitted[0]
+
 class Normalizer(Preprocessor):
     """
     Normlizes the spectra.
     Args:
         post_order (int): Polynom-order of the post_edge_line fit (Default: 3)
     """
-    post_order: int = 3
-    _pre_edge_coeff: Optional[np.ndarray] = PrivateAttr(None)
-    _post_edge_coeff: Optional[np.ndarray] = PrivateAttr(None)
+    pre: Union[Polynomial, Victoreen]
+    post: Union[Polynomial, KSpline]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_structure(cls, data: Any) -> Any:
+        for field in ["pre", "post"]:
+            val = data.get(field)
+            if val is not None:
+                if not isinstance(val, dict):
+                    raise ValueError(f"'{field}' must be a dictionary.")
+                if len(val) != 1:
+                    raise ValueError(f"'{field}' must contain exactly one model key.")
+        return data
+    
     def _transform(self) -> None:
         pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
         post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
 
-        A = np.vander(self.data.energies, 2)
-        self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self.data.absorption[:,pre_edge_slice].T)
-        pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
-        self.data.absorption -= pre_edge_fit
+        if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
+            start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
+            self.data.energies = self.data.energies[start_idx:]
+            self.data.absorption = self.data.absorption[:,start_idx:]
+            self.data.validate()
+        
+        if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
+            stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
+            self.data.energies = self.data.energies[:stop_idx]
+            self.data.absorption = self.data.absorption[:,:stop_idx]
+            self.data.validate()
 
-        A =  np.vander(self.data.energies, self.post_order + 1)
-        self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self.data.absorption[:,post_edge_slice].T)
-        self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
-        self.data.absorption /= self._post_edge_fit
+        e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
+        pre = self.pre.fit_transform(self.data, pre_edge_slice, e0_idx)
+        self.data.absorption -= pre
 
-        rows_with_neg = (self._post_edge_fit < 0).any(axis=1)
+        post = self.post.fit_transform(self.data, post_edge_slice, e0_idx)
+        self.data.absorption /= post
+
+        rows_with_neg = (post < 0).any(axis=1)
         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
         self.data.absorption = self.data.absorption[~rows_with_neg]
         self.data.times = self.data.times[~rows_with_neg]
-        self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
-        self._post_edge_coeff = self._post_edge_coeff[:,~rows_with_neg]
+        self.pre.mask(~rows_with_neg)
+        self.post.mask(~rows_with_neg)
 
         self.data.normalized = True 
+        
+    def _e0_idx(self, pre_idx: int, post_idx: int) -> npt.NDArray[np.integer]:
+        energy_slice = slice(pre_idx, post_idx)
+        deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+        return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
 
     def _plot(self) -> None:
-        assert self._pre_edge_coeff is not None
-        pre_edge_coeffs = self._pre_edge_coeff
-        assert self._post_edge_coeff is not None
-        post_edge_coeffs = self._post_edge_coeff
-
         fig, (ax1, ax2) = plt.subplots(1,2,figsize=(12,6))
         plt.subplots_adjust(bottom=0.25)
 
         idx0 = 0
-        pre_edge = np.dot(np.vander(self.data.energies, 2), pre_edge_coeffs[:,idx0]).T
-        post_edge = np.dot(np.vander(self.data.energies, self.post_order + 1), post_edge_coeffs[:,idx0]).T
+        pre_edge = self.pre.transform(self.data.energies, idx0)
+        post_edge = self.post.transform(self.data.energies, idx0)
 
         data_line, = ax1.plot(self.data.energies, self.data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self.data.times[idx0]}')
         pre_line, = ax1.plot(self.data.energies, pre_edge, ls="dashed", c="grey")
@@ -552,8 +680,8 @@ class Normalizer(Preprocessor):
 
         def update(val):
             idx = int(slider.val)
-            pre_edge = np.dot(np.vander(self.data.energies, 2), pre_edge_coeffs[:,idx]).T
-            post_edge = np.dot(np.vander(self.data.energies, self.post_order + 1), post_edge_coeffs[:,idx]).T
+            pre_edge = self.pre.transform(self.data.energies, idx)
+            post_edge = self.post.transform(self.data.energies, idx)
 
             data_line.set_ydata(self.data.absorption[idx] * post_edge + pre_edge)
             data_line.set_label(f'mu @ {self.data.times[idx]}')
@@ -568,6 +696,80 @@ class Normalizer(Preprocessor):
         plt.legend()
         plt.show()
 
+# class SplineNormalizer(Preprocessor):
+#     """
+#     Normlizes the spectra using a B-Spline in the post edge.
+#     Args:
+#         pre_order (int): Order of the Victoreen (Usually 1, 2 or 3; Default: 3)
+#         post_order (int): Order of the B_spline (Default: 3)
+#     """
+#     pre_order: int = 2
+#     post_order: int = 3
+#     post_weigth: int = 3
+#     _pre_edge_coeff: Optional[np.ndarray] = PrivateAttr(None)
+#     _post_Spline: list = PrivateAttr([])
+#     def _transform(self) -> None:
+#         pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
+#         post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
+
+#         if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
+#             start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
+#             self.data.energies = self.data.energies[start_idx:]
+#             self.data.absorption = self.data.absorption[:,start_idx:]
+#             self.data.validate()
+        
+#         if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
+#             stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
+#             self.data.energies = self.data.energies[:stop_idx]
+#             self.data.absorption = self.data.absorption[:,:stop_idx]
+#             self.data.validate()
+
+#         e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
+
+#         # this is actually victoreen with the exponents pre_order and 0
+#         A = np.column_stack([
+#             (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * self.data.energies)) ** self.pre_order,
+#             np.ones(len(self.data.energies))
+#         ])
+#         self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self.data.absorption[:,pre_edge_slice].T)
+#         pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
+#         self.data.absorption -= pre_edge_fit
+
+#         # B-spline fitting
+#         eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+#         post_edge_fit = np.zeros(self.data.absorption.shape)
+#         for i in range(len(self.data.times)):
+#             ks = np.sqrt((self.data.energies[post_edge_slice] - self.data.energies[e0_idx[i]]) * eV2revA)
+#             knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+#             self._post_Spline.append(sp.interpolate.make_lsq_spline(
+#                 ks, (self.data.absorption[i,post_edge_slice] * (ks**self.post_weigth)),
+#                 knots, k = self.post_order
+#             ))
+#             post_edge_fit[i,post_edge_slice] = self._post_Spline[i](ks) * (ks**(-self.post_weigth))
+#             post_edge_fit[i,:post_edge_slice.start] = post_edge_fit[i,post_edge_slice.start]
+        
+#         self.data.absorption /= post_edge_fit
+
+#         # A =  np.vander(self.data.energies, self.post_order + 1)
+#         # self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self.data.absorption[:,post_edge_slice].T)
+#         # self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
+#         # self.data.absorption /= self._post_edge_fit
+
+#         rows_with_neg = (post_edge_fit < 0).any(axis=1)
+#         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
+#         self.data.absorption = self.data.absorption[~rows_with_neg]
+#         self.data.times = self.data.times[~rows_with_neg]
+#         self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
+#         self._post_Spline = [s for s,i in enumerate(self._post_Spline) if i not in rows_with_neg]
+
+#         self.data.normalized = True
+
+#     def _e0_idx(self, pre_idx: int, post_idx: int):
+#         energy_slice = slice(pre_idx, post_idx)
+#         deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+#         return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
+        
+
 
 class NoiseFilter(Preprocessor):
     """
@@ -579,6 +781,7 @@ class NoiseFilter(Preprocessor):
 
     def _transform(self) -> None:
         rms_noise = np.sqrt(np.mean(np.square(np.diff(self.data.absorption, n=2, axis=1)), axis=1))
+        print(rms_noise)
 
         threshold = self.gate * np.median(rms_noise)
         mask = rms_noise < threshold
