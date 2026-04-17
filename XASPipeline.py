@@ -1,5 +1,6 @@
 # Hey Jannik
 
+from numpy._typing import NDArray
 import argparse, h5py, inspect, logging, pathlib, os, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
@@ -8,17 +9,18 @@ import numpy as np
 import numpy.typing as npt
 import scipy as sp
 
-from abc import abstractmethod
-from dataclasses import dataclass, field
+from abc import abstractmethod, ABC
+from dataclasses import dataclass
 from datetime import datetime
 from matplotlib import colormaps
 from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Slider
 from multiprocessing.pool import ThreadPool
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, BeforeValidator
-from pydantic.fields import FieldInfo
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from lmfit import Parameters, minimize, report_fit
-from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.optimize import leastsq
+from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args, cast
 
 
 def deltaE2k(deltaE):
@@ -33,7 +35,7 @@ def abs2AthenaRep(val: float) -> str:
     else:
         return " %17.10E" %val
 
-def readDatCols(logger, file_path, cols) -> np.array:
+def readDatCols(logger, file_path, cols) -> tuple[float, npt.NDArray[np.floating[Any]]]:
     logger.info(f"Reading {file_path}")
     with open(file_path, 'r') as f:
         data, t = [], 0
@@ -57,49 +59,59 @@ def readNorm(file_path: pathlib.Path, useCol: int | str = "flat") -> tuple[np.nd
         startReadout = True
     else:
         startReadout = False
+    uC: int = 1
     with open(file_path, 'r') as f:
         for l in f:
             if l[0] == "#":
                 headerline = l
             else:
-                if not startReadout:
+                if not startReadout and isinstance(useCol, str) :
                     try:
-                        useCol = headerline.split()[1:].index(useCol)
+                        uC = headerline.split()[1:].index(useCol)
                     except ValueError:
-                        useCol = 1
+                        uC = 1
                     startReadout = True
 
                 words = l.split()
                 energies.append(float(words[0]))
-                absorption.append(float(words[useCol]))
+                absorption.append(float(words[uC]))
 
     return np.array(energies), np.array(absorption)
 
 #region dataclass
 class XASPara:
-    def __init__(self, edge:str, element: str, edge_pos: float, pre_edge_range: tuple[float], post_edge_range: tuple[float]):
-        self.edge: str = edge
-        self.element: str = element
-        self.edge_pos: float = edge_pos
-        self._pre_edge_range: tuple = pre_edge_range
-        self._post_edge_range: tuple = post_edge_range
+    def __init__(
+            self,
+            edge:str,
+            element: str,
+            edge_pos: float,
+            pre_edge_range: tuple[float | None, float],
+            post_edge_range: tuple[float, float | None]
+            ):
+        self.edge = edge
+        self.element = element
+        self.edge_pos = edge_pos
+        self._pre_edge_range = pre_edge_range
+        self._post_edge_range = post_edge_range
         # self.beamline: str = beamline
         # self.path: pathlib.Path = path if isinstance(path, pathlib.Path) else pathlib.Path(path)
         # self.name: str
 
     @property
-    def pre_edge_range(self) -> tuple[float]:
-        return tuple(self.edge_pos + e if not isinstance(e, type(None)) else None for e in self._pre_edge_range)
+    def pre_edge_range(self) -> tuple[float | None, float]:
+        e1, e2 = self._pre_edge_range
+        return (self.edge_pos + e1 if e1 is not None else None, self.edge_pos + e2)
 
     @property
-    def post_edge_range(self) -> tuple[float]:
-        return tuple(self.edge_pos + e if not isinstance(e, type(None)) else None for e in self._post_edge_range)
+    def post_edge_range(self) -> tuple[float, float | None]:
+        e1, e2 = self._post_edge_range
+        return (self.edge_pos + e1, self.edge_pos + e2 if e2 is not None else None)
 
 @dataclass
 class XASData:
-    energies: npt.NDArray[np.floating]
-    times: npt.NDArray[np.floating]
-    absorption: npt.NDArray[np.floating]
+    energies: npt.NDArray[np.floating[Any]]
+    times: npt.NDArray[np.floating[Any]]
+    absorption: npt.NDArray[np.floating[Any]]
     normalized: bool = False
 
     def __post_init__(self):
@@ -122,23 +134,27 @@ class XASData:
             case "P65-SDD":
                 files = list(directory.glob(f"*{name}*.dat"))
                 extract_func = lambda l, f: cls.extract_data_dat(l, f, [[1], [13, 14, 15, 16] ,[9]], False)
+            case _:
+                raise ValueError("No beamline specified")
+            
         if len(files) == 0:
             raise ValueError(f"No files with name '{name}' in '{directory}' found.")
 
         return extract_func(logger, files)
 
     @classmethod
-    def extract_data_hdf5(cls, logger: logging.Logger, files: list[pathlib.Path]):
+    def extract_data_hdf5(cls: type['XASData'], logger: logging.Logger, files: list[pathlib.Path]) -> 'XASData':
         def conv_time(date_str: str):
             try:
                 return datetime.strptime(date_str, r"%Y-%m-%d %H:%M:%S.%f").timestamp()
             except ValueError:
                 return np.nan
 
+        energy, times, mu = np.array([]), np.array([]), np.array([])
         for i, file in enumerate(files):
             with h5py.File(file, 'r') as run_datafile:
-                e = np.array(run_datafile['energy'][0,:-1])
-                t = np.array([conv_time(str(t)[2:-1]) for t in run_datafile['time']])
+                e = np.array(cast(h5py.Dataset, run_datafile['energy'])[0,:-1])
+                t = np.array([conv_time(str(t)[2:-1]) for t in cast(h5py.Dataset, run_datafile['time'])])
                 m = np.array(run_datafile['mu'])[:,:-1]
 
             if i == 0:
@@ -160,6 +176,8 @@ class XASData:
     def extract_data_dat(cls, logger: logging.Logger, files: list[pathlib.Path], cols: list, log: bool):
         colSlicer = [num for sublist in cols for num in sublist]
         e_slice, num_slice, de_slice = slice(0, len(cols[0])+1), slice(len(cols[0]) + 1, len(cols[0]) + len(cols[1]) + 1), slice(len(cols[0]) + len(cols[1]) + 1, len(cols[0]) + len(cols[1]) + len(cols[2]) + 1)
+
+        energy, times, mu = np.array([]), [], np.array([])
         for i, file in enumerate(files):
             t, data = readDatCols(logger, file, colSlicer)
             e, m = np.sum(data[:, e_slice], axis=1), np.sum(data[:,num_slice], axis=1) / np.sum(data[:,de_slice], axis=1)
@@ -174,10 +192,11 @@ class XASData:
                 
                 times.append(t)
                 mu = np.concat([mu, m], axis = 0)
+        times = np.array(times)
         if log:
-            return cls(times - times(0), energy, np.log(mu))
+            return cls(times - times[0], energy, np.log(mu))
         else:
-            return cls(times - times(0), energy, mu)
+            return cls(times - times[0], energy, mu)
         
     def removeNan(self):
         has_nan = np.isnan(self.absorption).any(axis=1)
@@ -224,7 +243,7 @@ class XASData:
                     line_elements = [f" {energy:10.4f}    ", abs2AthenaRep(abs_vals)]
                     f.write("".join(line_elements) + "\n")
         
-    def toNORM(self, path:pathlib.Path, name: str, para:XASPara, comment:str|None, mode:str):
+    def toNORM(self, path:pathlib.Path, name: str, para:XASPara, comment:str|None):
         with open(path / (name + ".norm"), 'w') as f:
             f.write(f"# XAS Data processed by XASPipeline\n# Shape: ({len(self.times)}, {len(self.energies)})\n")
             if comment is not None:
@@ -248,44 +267,69 @@ class XASData:
         
     def energyRange2idx(self, low, up) -> slice:        
         if isinstance(low, type(None)) & isinstance(up, type(None)):
-            return slice(0, -1)
+            return slice(0, None)
         elif isinstance(low, type(None)):
-            return slice(0, np.argmax(self.energies > up) -1)
+            return slice(0, np.argmax(self.energies > up), None)
         elif isinstance(up, type(None)):
-            return slice(np.argmax(self.energies > low), -1)
+            return slice(np.argmax(self.energies > low), None)
         
         if low > up:
             raise ValueError("energyRange2idx requires the low value to be smaller than the up value")
         
-        return slice(np.argmax(self.energies > low), np.argmax(self.energies > up) -1)
+        return slice(np.searchsorted(self.energies, low), np.searchsorted(self.energies, up))
 #endregion
 
 #region XASReference
 class XASRef(BaseModel):
-    mu: Optional[np.ndarray] = None
+    _mu: Optional[npt.NDArray] = None
     name: str
-    source_e: Optional[np.ndarray] = None
-    source_mu: Optional[np.ndarray] = None
+    color: Optional[str] = None
+    source_e: Optional[npt.NDArray[np.floating[Any]]] = None
+    source_mu: Optional[npt.NDArray[np.floating[Any]]] = None
+    source_idx: Optional[int] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     color: Optional[str] = None
 
+    @model_validator(mode='before')
     @classmethod
-    def from_norm(cls, path: pathlib.Path) -> "XASRef":
-        name = path.stem
-        name = name.split('_')[0]
-        energy, mu = readNorm(path)
-        return cls(name = name, source_e = energy, source_mu = mu)
+    def from_conf(cls, conf: list[Any]) -> dict[Any,Any]:
+        if not conf:
+            raise ValueError("XASRef configuration list cannot be empty")
+        ref = conf[0]
+        color = conf[1] if len(conf) > 1 else None
+        name = conf[2] if len(conf) > 2 else None
+
+        if isinstance(ref, int):
+            if name is None: name = f"Spectra {ref}"
+            return dict(name=name, source_idx=ref, color = color)
+        else:
+            path = pathlib.Path(ref).resolve()
+            energy, mu = readNorm(path)
+            if name is None: name = path.stem
+            return dict(name = name, source_e = energy, source_mu = mu, color = color)
+    
+    @property
+    def mu(self) -> npt.NDArray:
+        assert self._mu is not None, "Before extracting mu from XASRef it has to be pulled from the data using pull_data and the provided idx or resampled from the provided ref file."
+        return self._mu
+    
+    def pull_data(self, mu: npt.NDArray):
+        if self.source_idx is not None:
+            self.absorption = mu[self.source_idx]
 
     def resample(self, target_energy: np.ndarray):
-        if self.mu is not None:
+        if self._mu is not None:
             if len(self.mu) == len(target_energy):
                 return
         if self.source_e is not None and self.source_mu is not None:
-            self.mu = self._rebin(target_energy)
+            self._mu = self._rebin(target_energy)
         else:
             raise ValueError("XASRef has not data and no source to resample from!")
     
     def _rebin(self, target_energy: np.ndarray):
+        assert self.source_e is not None
+        assert self.source_mu is not None
+
         midpoints = (target_energy[:-1] + target_energy[1:]) / 2
         edges = np.concatenate([
             [target_energy[0] - (target_energy[1] - target_energy[0]) / 2],
@@ -297,16 +341,6 @@ class XASRef(BaseModel):
         resampled_integral = np.interp(edges, self.source_e, cum_integral)
         return np.diff(resampled_integral) / np.diff(edges)
 
-def str2Ref(x: Any) -> XASRef:
-    if isinstance(x, tuple):
-        path, color = x
-        ref = XASRef.from_norm(pathlib.Path(path))
-        ref.color = color  # Add a color attribute to the XASRef object
-        return ref
-    else:
-        return XASRef.from_norm(pathlib.Path(x)) if isinstance(x, (str, pathlib.Path)) else x
-
-#region PipelineContex
 class PipelineContext(BaseModel):
     path: pathlib.Path
     exp_name: str
@@ -315,20 +349,25 @@ class PipelineContext(BaseModel):
 #endregion
 
 #region Processor
+possible_path = Union[pathlib.Path, int]
+RESOLUTION_MAP: dict[type[Any], Any] = {
+    XASRef: Union[tuple[possible_path], tuple[possible_path, *tuple[Any, ...]]],
+}
+
 class Processor(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     logger: ClassVar[logging.Logger] = logging.getLogger("XAS-Pipeline")
 
-    name: str = None
+    name: str 
     plot: bool = False
 
-    para: ClassVar[XASPara] = None
-    _data: XASData = PrivateAttr(default=None)
+    para: ClassVar[XASPara]
+    _data: XASData | None = PrivateAttr(default=None)
 
     @classmethod
     def with_context(cls, data: dict, context: PipelineContext):
         for field_name, field_info in cls.model_fields.items():
-            if field_name in data:
+            if (field_name in data) and (field_info.annotation is not None):
                 data[field_name] = cls._resolve_paths(field_info.annotation, data[field_name], context.path)
             else:
                 val = getattr(context, field_name, None)
@@ -343,7 +382,7 @@ class Processor(BaseModel):
         return cls.model_validate(data)
     
     @staticmethod
-    def _resolve_paths(annotation: type, val: any, base_path: pathlib.Path) -> any:
+    def _resolve_paths(annotation: type[Any], val: Any, base_path: pathlib.Path) -> Any:
         origin = get_origin(annotation)
         if origin is Annotated:
             return Processor._resolve_paths(get_args(annotation)[0], val, base_path)
@@ -361,13 +400,28 @@ class Processor(BaseModel):
             else:
                 return [Processor._resolve_paths(get_args(annotation)[0], item, base_path) for item in val]
         
+        if origin is tuple:
+            if not isinstance(val, (list, tuple)): return val
+            type_args = get_args(annotation)
+
+            if len(val) < len(type_args):
+                raise ValueError(f"Expected a tuple/list of length {len(type_args)}, but got {len(val)}.")
+            
+            if len(type_args) == 2 and type_args[1] is Ellipsis:
+                return tuple(Processor._resolve_paths(type_args[0], item, base_path) for item in val)
+            a = tuple(Processor._resolve_paths(type_args[i], val[i], base_path) if i < len(type_args) else val[i] for i in range(len(val)))
+            return a
+        
+        if annotation in RESOLUTION_MAP:
+            return Processor._resolve_paths(RESOLUTION_MAP[annotation], val, base_path)
+        
         if isinstance(val, str) and Processor._is_path_type(annotation):
             return Processor._resolve_relative_paths(val, base_path)
 
         return val
 
     @staticmethod
-    def _is_path_type(tpl: any) -> bool:
+    def _is_path_type(tpl: Any) -> bool:
         path_types = (pathlib.Path, XASRef)
         try:
             if get_origin(tpl) is Annotated:
@@ -382,20 +436,35 @@ class Processor(BaseModel):
         if val_path.is_absolute():
             return val_path
         else:
-            return base_path / val_path
+            return (base_path / val_path).resolve()
+
+    @property
+    def data(self) -> XASData:
+        if self._data is None:
+            raise RuntimeError(
+                f"Processor '{self.name}' attempted to access data before transform() was called. "
+                "Ensure the pipeline is orchestrating calls correctly."
+            )
+        return self._data
+
+    @data.setter
+    def data(self, data: XASData):
+        if not isinstance(data, XASData):
+            raise RuntimeError(f"Attribute data in {self.name} can only be of type {type(XASData)} not {type(data)}")
+        self._data = data
 #endregion
 
 #region Preprocessors
 class Preprocessor(Processor):
 
     def transform(self, data: XASData) -> XASData:
-        self._data = data
+        self.data = data
         self.logger.info(f"Preprocessor {self.name} started")
         start_time = time.time()
         
         self._transform()
         try:
-            self._data.validate()
+            self.data.validate()
         except (ValueError, TypeError) as e:
             error_msg = f"Validation failed after '{self.name}': {str(e)}"
             self.logger.error(error_msg)
@@ -405,20 +474,125 @@ class Preprocessor(Processor):
         self.logger.info(f"Preprocessor {self.name} finished after {round(duration, 4)} s.")
         if self.plot:
             self._plot()
-        return self._data
+        return self.data
 
     @abstractmethod
     def _transform(self) -> None:
         pass
 
     def _plot(self) -> None:
-        step = max(int(len(self._data.times)/20), 1)
+        step = max(int(len(self.data.times)/20), 1)
         plt.subplots()
-        for i, spectra in enumerate(self._data.absorption[::step, :]):
-            plt.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
+        for i, spectra in enumerate(self.data.absorption[::step, :]):
+            plt.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
         plt.title(f"Preprocessor {self.name}")
         plt.legend(frameon=False, loc="lower right", ncols=2)
         plt.show()
+
+
+class BackgroundModel(BaseModel, ABC):
+    _fitted_params: Any = PrivateAttr(None)
+    @abstractmethod
+    def fit_transform(self, data: XASData, e_slice: slice,  e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        pass
+
+    @abstractmethod
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        pass
+
+    def mask(self, selection: Any):
+        assert self._fitted_params is not None, "Cannot mask before fitting."
+        
+        if isinstance(self._fitted_params, np.ndarray):
+            self._fitted_params = self._fitted_params[:,selection]
+        elif isinstance(self._fitted_params, list):
+            self._fitted_params = [item for i, item in enumerate(self._fitted_params) if selection[i]]
+
+    @model_validator(mode="before")
+    @classmethod
+    def match_class_name(cls, data: Any) -> Any:
+        if cls.__name__ not in data.keys():
+            raise ValueError(f"{cls} is not in {data.keys()}")
+        
+        return data[cls.__name__] or {}
+
+class Polynomial(BackgroundModel):
+    order: int = 3
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.vander(data.energies, self.order + 1)
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        return np.dot(A, self._fitted_params).T
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        assert self._fitted_params is not None, f"cant access Polynomial data without fit"
+        if spec_idx is None:
+            return np.dot(np.vander(energies, self.order + 1), self._fitted_params).T
+        else:
+            return np.dot(np.vander(energies, self.order + 1), self._fitted_params[:,spec_idx]).T
+        
+class Victoreen(BackgroundModel):
+    order: int = 3
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.column_stack([
+            (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * data.energies)) ** self.order, np.ones(len(data.energies))
+        ])
+
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        return np.dot(A, self._fitted_params).T
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        A = np.column_stack([
+            (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * energies)) ** self.order, np.ones(len(energies))
+        ])
+
+        assert self._fitted_params is not None; f"cant access Polynomial data without fit"
+        if spec_idx is None:
+            return np.dot(A, self._fitted_params).T
+        else:
+            return np.dot(A, self._fitted_params[:,spec_idx]).T
+
+class KSpline(BackgroundModel):
+    order: int = 3
+    weigth: int = 3
+    _e0_idx: Optional[npt.NDArray[np.integer]]
+    _e_slice: Optional[slice]
+    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+        self._e0_idx = e0_idx
+        assert self._e0_idx is not None
+        self._e_slice = e_slice
+        eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+
+        self._fitted_params = []
+        fitted = np.zeros(data.absorption.shape)
+        for i in range(len(data.times)):
+            ks = np.sqrt((data.energies[e_slice] - data.energies[self._e0_idx[i]]) * eV2revA)
+            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+            self._fitted_params.append(sp.interpolate.make_lsq_spline(
+                ks, (data.absorption[i,e_slice] * (ks**self.weigth)),
+                knots, k = self.order
+            ))
+            fitted[i,e_slice] = self._fitted_params[i](ks) * (ks**(-self.weigth))
+            fitted[i,:e_slice.start] = fitted[i,e_slice.start]
+        
+        return fitted
+    
+    def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
+        assert self._fitted_params is not None, "Cannot transform before fitting."
+        assert self._e0_idx is not None
+        assert self._e_slice is not None
+        eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+
+        fitted = np.zeros((len(self._fitted_params),len(energies))) if spec_idx is None else np.zeros((1,len(energies)))
+        iterator = range(len(self._fitted_params)) if spec_idx is None else [spec_idx]
+        for j, i in enumerate(iterator):
+            ks = np.sqrt((energies[self._e_slice] - energies[self._e0_idx[i]]) * eV2revA)
+            fitted[j,self._e_slice] = self._fitted_params[i](ks) * (ks**(-self.weigth))
+            fitted[j,:self._e_slice.start] = fitted[j,self._e_slice.start]
+        
+        if spec_idx is None:
+            return fitted
+        else:
+            return fitted[0]
 
 class Normalizer(Preprocessor):
     """
@@ -426,62 +600,100 @@ class Normalizer(Preprocessor):
     Args:
         post_order (int): Polynom-order of the post_edge_line fit (Default: 3)
     """
-    post_order: int = 3
-    _pre_edge_coeff: np.ndarray = PrivateAttr(None)
-    _post_edge_coeff: np.ndarray = PrivateAttr(None)
+    pre: Union[Polynomial, Victoreen]
+    post: Union[Polynomial, KSpline]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_structure(cls, data: Any) -> Any:
+        for field in ["pre", "post"]:
+            val = data.get(field)
+            if val is not None:
+                if not isinstance(val, dict):
+                    raise ValueError(f"'{field}' must be a dictionary.")
+                if len(val) != 1:
+                    raise ValueError(f"'{field}' must contain exactly one model key.")
+        return data
+    
     def _transform(self) -> None:
-        pre_edge_slice = self._data.energyRange2idx(*self.para.pre_edge_range)
-        post_edge_slice = self._data.energyRange2idx(*self.para.post_edge_range)
+        pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
+        post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
 
-        A = np.vander(self._data.energies, 2)
-        self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self._data.absorption[:,pre_edge_slice].T)
-        pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
-        self._data.absorption -= pre_edge_fit
+        if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
+            start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
+            self.data.energies = self.data.energies[start_idx:]
+            self.data.absorption = self.data.absorption[:,start_idx:]
+            self.data.validate()
+            pre_edge_slice = slice(pre_edge_slice.start-start_idx, pre_edge_slice.stop-start_idx)
+            post_edge_slice = slice(post_edge_slice.start-start_idx, post_edge_slice.stop-start_idx)
+        
+        if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
+            stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
+            self.data.energies = self.data.energies[:stop_idx]
+            self.data.absorption = self.data.absorption[:,:stop_idx]
+            self.data.validate()
+            
 
-        A =  np.vander(self._data.energies, self.post_order + 1)
-        self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self._data.absorption[:,post_edge_slice].T)
-        self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
-        self._data.absorption /= self._post_edge_fit
+        e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
+        pre = self.pre.fit_transform(self.data, pre_edge_slice, e0_idx)
+        self.data.absorption -= pre
 
-        rows_with_neg = (self._post_edge_fit < 0).any(axis=1)
-        self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self._data.times)} due to negative values in post_line spline")
-        self._data.absorption = self._data.absorption[~rows_with_neg]
-        self._data.times = self._data.times[~rows_with_neg]
-        self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
-        self._post_edge_coeff = self._post_edge_coeff[:,~rows_with_neg]
+        post = self.post.fit_transform(self.data, post_edge_slice, e0_idx)
+        self.data.absorption /= post
 
-        self._data.normalized = True 
+        rows_with_neg = (post < 0).any(axis=1)
+        self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
+        self.data.absorption = self.data.absorption[~rows_with_neg]
+        self.data.times = self.data.times[~rows_with_neg]
+        self.pre.mask(~rows_with_neg)
+        self.post.mask(~rows_with_neg)
+
+        self.data.normalized = True 
+        
+    def _e0_idx(self, pre_idx: int, post_idx: int) -> npt.NDArray[np.integer]:
+        energy_slice = slice(pre_idx, post_idx)
+        deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+        return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
 
     def _plot(self) -> None:
-        fig, ax = plt.subplots(figsize=(8,4))
+        fig, (ax1, ax2) = plt.subplots(1,2,figsize=(12,6))
         plt.subplots_adjust(bottom=0.25)
 
         idx0 = 0
-        pre_edge = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff[:,idx0]).T
-        post_edge = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff[:,idx0]).T
+        pre_edge = self.pre.transform(self.data.energies, idx0)
+        post_edge = self.post.transform(self.data.energies, idx0)
 
-        data_line, = ax.plot(self._data.energies, self._data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self._data.times[idx0]}')
-        pre_line, = ax.plot(self._data.energies, pre_edge, ls="dashed", c="grey")
-        post_line, = ax.plot(self._data.energies, post_edge + pre_edge, ls="dashed", c="grey")
+        data_line, = ax1.plot(self.data.energies, self.data.absorption[idx0] * post_edge + pre_edge, label=f'mu @ {self.data.times[idx0]}')
+        pre_line, = ax1.plot(self.data.energies, pre_edge, ls="dashed", c="grey")
+        post_line, = ax1.plot(self.data.energies, post_edge + pre_edge, ls="dashed", c="grey")
+        ax1.set_xlim(self.data.energies[0], self.data.energies[-1])
+
+        norm_line, = ax2.plot(self.data.energies, self.data.absorption[idx0])
+        ax2.axhline(1, ls="dotted", color="grey")
+        ax2.set_xlim(self.data.energies[0], self.data.energies[-1])
+        ax2.set_ylim(0, 1.5)
+
 
         for e in (val for val in self.para.pre_edge_range if val is not None):
             plt.axvline(e, ls="dashed", color="grey")
         for e in (val for val in self.para.post_edge_range if val is not None):
             plt.axvline(e, ls="dashed", color="grey")
 
-        ax_slider = plt.axes([0.2, 0.1, 0.65, 0.03])
-        slider = Slider(ax_slider, 'Timepoint', 0, self._data.times.shape[0]-1, 
+        ax_slider = plt.axes((0.2, 0.1, 0.65, 0.03))
+        slider = Slider(ax_slider, 'Timepoint', 0, self.data.times.shape[0]-1, 
                         valinit=idx0, valfmt='%d')
 
         def update(val):
             idx = int(slider.val)
-            pre_edge = np.dot(np.vander(self._data.energies, 2), self._pre_edge_coeff[:,idx]).T
-            post_edge = np.dot(np.vander(self._data.energies, self.post_order + 1), self._post_edge_coeff[:,idx]).T
+            pre_edge = self.pre.transform(self.data.energies, idx)
+            post_edge = self.post.transform(self.data.energies, idx)
 
-            data_line.set_ydata(self._data.absorption[idx] * post_edge + pre_edge)
-            data_line.set_label(f'mu @ {self._data.times[idx]}')
+            data_line.set_ydata(self.data.absorption[idx] * post_edge + pre_edge)
+            data_line.set_label(f'mu @ {self.data.times[idx]}')
             pre_line.set_ydata(pre_edge)
             post_line.set_ydata(post_edge + pre_edge)
+            norm_line.set_ydata(self.data.absorption[idx])
+
             fig.canvas.draw_idle()
         
         slider.on_changed(update)
@@ -489,17 +701,79 @@ class Normalizer(Preprocessor):
         plt.legend()
         plt.show()
 
+# class SplineNormalizer(Preprocessor):
+#     """
+#     Normlizes the spectra using a B-Spline in the post edge.
+#     Args:
+#         pre_order (int): Order of the Victoreen (Usually 1, 2 or 3; Default: 3)
+#         post_order (int): Order of the B_spline (Default: 3)
+#     """
+#     pre_order: int = 2
+#     post_order: int = 3
+#     post_weigth: int = 3
+#     _pre_edge_coeff: Optional[np.ndarray] = PrivateAttr(None)
+#     _post_Spline: list = PrivateAttr([])
+#     def _transform(self) -> None:
+#         pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
+#         post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
 
-        # step = max(int(len(self._data.times)/20), 1)
-        # for i in range(0,len(self._data.times),step):
-        #     ax.plot(self._data.energies, self._data.absorption[i])
+#         if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
+#             start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
+#             self.data.energies = self.data.energies[start_idx:]
+#             self.data.absorption = self.data.absorption[:,start_idx:]
+#             self.data.validate()
         
-        # ax.axhline(1)
-        # for e in (val for val in self.para.pre_edge_range if val is not None):
-        #     ax.axvline(e, ls="dashed", color="grey")
-        # for e in (val for val in self.para.post_edge_range if val is not None):
-        #     ax.axvline(e, ls="dashed", color="grey")
-        # plt.show()
+#         if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
+#             stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
+#             self.data.energies = self.data.energies[:stop_idx]
+#             self.data.absorption = self.data.absorption[:,:stop_idx]
+#             self.data.validate()
+
+#         e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
+
+#         # this is actually victoreen with the exponents pre_order and 0
+#         A = np.column_stack([
+#             (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * self.data.energies)) ** self.pre_order,
+#             np.ones(len(self.data.energies))
+#         ])
+#         self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self.data.absorption[:,pre_edge_slice].T)
+#         pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
+#         self.data.absorption -= pre_edge_fit
+
+#         # B-spline fitting
+#         eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
+#         post_edge_fit = np.zeros(self.data.absorption.shape)
+#         for i in range(len(self.data.times)):
+#             ks = np.sqrt((self.data.energies[post_edge_slice] - self.data.energies[e0_idx[i]]) * eV2revA)
+#             knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+#             self._post_Spline.append(sp.interpolate.make_lsq_spline(
+#                 ks, (self.data.absorption[i,post_edge_slice] * (ks**self.post_weigth)),
+#                 knots, k = self.post_order
+#             ))
+#             post_edge_fit[i,post_edge_slice] = self._post_Spline[i](ks) * (ks**(-self.post_weigth))
+#             post_edge_fit[i,:post_edge_slice.start] = post_edge_fit[i,post_edge_slice.start]
+        
+#         self.data.absorption /= post_edge_fit
+
+#         # A =  np.vander(self.data.energies, self.post_order + 1)
+#         # self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self.data.absorption[:,post_edge_slice].T)
+#         # self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
+#         # self.data.absorption /= self._post_edge_fit
+
+#         rows_with_neg = (post_edge_fit < 0).any(axis=1)
+#         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
+#         self.data.absorption = self.data.absorption[~rows_with_neg]
+#         self.data.times = self.data.times[~rows_with_neg]
+#         self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
+#         self._post_Spline = [s for s,i in enumerate(self._post_Spline) if i not in rows_with_neg]
+
+#         self.data.normalized = True
+
+#     def _e0_idx(self, pre_idx: int, post_idx: int):
+#         energy_slice = slice(pre_idx, post_idx)
+#         deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+#         return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
+        
 
 
 class NoiseFilter(Preprocessor):
@@ -511,7 +785,7 @@ class NoiseFilter(Preprocessor):
     gate: float = 3
 
     def _transform(self) -> None:
-        rms_noise = np.sqrt(np.mean(np.square(np.diff(self._data.absorption, n=2, axis=1)), axis=1))
+        rms_noise = np.sqrt(np.mean(np.square(np.diff(self.data.absorption, n=2, axis=1)), axis=1))
 
         threshold = self.gate * np.median(rms_noise)
         mask = rms_noise < threshold
@@ -525,9 +799,9 @@ class NoiseFilter(Preprocessor):
             plt.show()
 
         if np.sum(~mask):
-            init_num = len(self._data.times)
-            self._data.absorption = self._data.absorption[mask, :]
-            self._data.times = self._data.times[mask]
+            init_num = len(self.data.times)
+            self.data.absorption = self.data.absorption[mask, :]
+            self.data.times = self.data.times[mask]
             self.logger.info(f"Preprocessor {self.name} removed {np.sum(~mask)} from {init_num}")
 
 class Savgol_filter(Preprocessor):
@@ -541,7 +815,7 @@ class Savgol_filter(Preprocessor):
     polyorder: int = 3
 
     def _transform(self) -> None:
-        self._data.absorption = sp.signal.savgol_filter(self._data.absorption, window_length=self.window_length, polyorder=self.polyorder, axis=1)
+        self.data.absorption = sp.signal.savgol_filter(self.data.absorption, window_length=self.window_length, polyorder=self.polyorder, axis=1)
 
 class Rebinner(Preprocessor):
     """
@@ -552,8 +826,8 @@ class Rebinner(Preprocessor):
         edge_bin (float): Bin size of the edge region in eV (Default: 0.5)
         post_edge_bin (float): Bin size of the post edge region in A-1 (Default: 0.05)
     """
-    edge_range: tuple[float, float] = None
-    _edge_range: tuple[float, float] = PrivateAttr(default=None)
+    edge_range: Optional[tuple[float, float]] = None
+    # _edge_range: tuple[float, float] = PrivateAttr(default=None)
     pre_edge_bin: float = 10
     edge_bin: float = 1
     post_edge_bin: float = 0.05
@@ -564,37 +838,37 @@ class Rebinner(Preprocessor):
         print("IDK ob ich hier redefinition der Edge zulassen sollte. IDK ob ich automatische erkennung aktivieren sollte")
         if self.edge_range is None:
             self.edge_range = (self.para._pre_edge_range[1], self.para._post_edge_range[0])
-
-    def _compile_range(self):
-        self._edge_range = tuple(e + self.para.edge_pos for e in self.edge_range)
+    
+    @property
+    def _edge_range(self) -> tuple[float, float]:
+        assert self.edge_range is not None
+        return (self.edge_range[0] + self.para.edge_pos, self.edge_range[1] + self.para.edge_pos)
 
     def _boxcar_average(self, e_start, e_end):
-        i_start = np.searchsorted(self._data.energies, e_start)
-        i_end = np.searchsorted(self._data.energies, e_end) - 1
+        i_start = np.searchsorted(self.data.energies, e_start)
+        i_end = np.searchsorted(self.data.energies, e_end) - 1
         if i_start >= i_end:
             raise ValueError(f"no data in bin [{e_start}, {e_end}]") 
         
-        t_start = (e_start - self._data.energies[i_start-1]) / (self._data.energies[i_start] - self._data.energies[i_start-1])
-        t_end = (e_end - self._data.energies[i_end]) / (self._data.energies[i_end+1] - self._data.energies[i_end])
-        abs_start = self._data.absorption[: ,i_start-1] * (1-t_start) + self._data.absorption[: ,i_start] * t_start
-        abs_end = self._data.absorption[: ,i_end] * (1-t_end) + self._data.absorption[: ,i_end+1] * t_end
+        t_start = (e_start - self.data.energies[i_start-1]) / (self.data.energies[i_start] - self.data.energies[i_start-1])
+        t_end = (e_end - self.data.energies[i_end]) / (self.data.energies[i_end+1] - self.data.energies[i_end])
+        abs_start = self.data.absorption[: ,i_start-1] * (1-t_start) + self.data.absorption[: ,i_start] * t_start
+        abs_end = self.data.absorption[: ,i_end] * (1-t_end) + self.data.absorption[: ,i_end+1] * t_end
 
 
-        areas = (abs_start + self._data.absorption[: ,i_start]) / 2 * (self._data.energies[i_start] - e_start)
+        areas = (abs_start + self.data.absorption[: ,i_start]) / 2 * (self.data.energies[i_start] - e_start)
         for i in range(i_start, i_end):
-            areas += (self._data.absorption[: ,i] + self._data.absorption[: ,i+1]) / 2 * (self._data.energies[i+1] - self._data.energies[i])
-        areas += (self._data.absorption[: ,i_end] + abs_end) / 2 * (e_end - self._data.energies[i_end])
+            areas += (self.data.absorption[: ,i] + self.data.absorption[: ,i+1]) / 2 * (self.data.energies[i+1] - self.data.energies[i])
+        areas += (self.data.absorption[: ,i_end] + abs_end) / 2 * (e_end - self.data.energies[i_end])
         return areas / (e_end - e_start)
 
     def _transform(self):
-        self._compile_range()
-
-        pre_n  = int(np.ceil((self._edge_range[0] - self._data.energies[0]) / self.pre_edge_bin))
+        pre_n  = int(np.ceil((self._edge_range[0] - self.data.energies[0]) / self.pre_edge_bin))
         edge_n = int(np.ceil((self._edge_range[1] - self._edge_range[0]) / self.edge_bin))
         post_e = self._edge_range[0] + edge_n * self.edge_bin
         post_k = deltaE2k(post_e - self.para.edge_pos)
               
-        post_n = int(np.ceil((deltaE2k(self._data.energies[-1] - post_e) - post_k) / self.post_edge_bin))
+        post_n = int(np.ceil((deltaE2k(self.data.energies[-1] - post_e) - post_k) / self.post_edge_bin))
 
         steps = np.concat([
             np.linspace(self._edge_range[0] - pre_n * self.pre_edge_bin, self._edge_range[0], pre_n, False),
@@ -602,23 +876,23 @@ class Rebinner(Preprocessor):
             k2deltaE(np.linspace(post_k, post_k + post_n * self.post_edge_bin, post_n, False)) + self.para.edge_pos
         ], axis=0)
 
-        self._data.absorption = np.stack([self._boxcar_average(steps[i], steps[i+1]) for i in range(len(steps)-1)], axis = 1)
-        self._data.energies = np.array([(steps[i] + steps[i+1]) / 2 for i in range(len(steps)-1)])
+        self.data.absorption = np.stack([self._boxcar_average(steps[i], steps[i+1]) for i in range(len(steps)-1)], axis = 1)
+        self.data.energies = np.array([(steps[i] + steps[i+1]) / 2 for i in range(len(steps)-1)])
 
 class Merger(Preprocessor):
     mode: Literal['all', 'auto', 'manuel'] = "all"
     threshold: float = 0.03
-    _groups: np.ndarray[int] = PrivateAttr(default=None)
-    _times: np.ndarray[float] = PrivateAttr(default=None)
+    _groups: npt.NDArray[np.integer[Any]] | None = PrivateAttr(default=None)
+    _times: npt.NDArray[np.floating[Any]]| None = PrivateAttr(default=None)
 
     def _merge_all(self):
-        self._data.absorption = self._data.absorption.mean(axis=0)[np.newaxis, :]
-        self._data.times = np.arange(1)
+        self.data.absorption = self.data.absorption.mean(axis=0)[np.newaxis, :]
+        self.data.times = np.arange(1).astype(np.float64)
 
     def _merge_manuel(self):
         fig, ax = plt.subplots()
-        X, Y = np.meshgrid(self._data.energies, np.arange(len(self._data.times)))
-        heatmap = ax.pcolormesh(X, Y, self._data.absorption-np.mean(self._data.absorption, axis=0), cmap="bwr", shading="auto")
+        X, Y = np.meshgrid(self.data.energies, np.arange(len(self.data.times)))
+        heatmap = ax.pcolormesh(X, Y, self.data.absorption-np.mean(self.data.absorption, axis=0), cmap="bwr", shading="auto")
         fig.colorbar(heatmap)
         fig.show()
         
@@ -641,11 +915,11 @@ class Merger(Preprocessor):
             ranges.append(slice(*r))
 
         plt.close(fig)
-        self._data.absorption = np.stack([np.mean(self._data.absorption[r], axis=0) for r in ranges], axis= 0)
-        self._data.times = np.arange(len(ranges))
+        self.data.absorption = np.stack([np.mean(self.data.absorption[r], axis=0) for r in ranges], axis= 0)
+        self.data.times = np.arange(len(ranges)).astype(np.float64)
 
     def _merge_auto(self):
-        dist_matrix = sp.spatial.distance.pdist(self._data.absorption, metric=lambda u,v: np.sqrt(np.mean(np.square(u-v))))
+        dist_matrix = sp.spatial.distance.pdist(self.data.absorption, metric=lambda u,v: np.sqrt(np.mean(np.square(u-v))))
 
         if self.plot:
             plt.subplots()
@@ -653,20 +927,21 @@ class Merger(Preprocessor):
             plt.hist(dist_matrix, log=True)
             plt.show()
 
-        Z = sp.cluster.hierarchy.linkage(dist_matrix, method='complete')
-        self._groups = sp.cluster.hierarchy.fcluster(Z, t=self.threshold, criterion='distance') - 1
+        Z = linkage(dist_matrix, method='complete')
+        self._groups = fcluster(Z, t=self.threshold, criterion='distance') - 1
+        assert self._groups is not None
 
         g_total = max(self._groups) + 1
         group_list: list[list[int]] = [[] for x in range(g_total)]
         for i, g in enumerate(self._groups):
             group_list[g].append(i)
 
-        self._data.absorption = np.stack([np.mean(self._data.absorption[g], axis=0) for g in group_list], axis=0)
-        self._data.times = np.arange(g_total)
+        self.data.absorption = np.stack([np.mean(self.data.absorption[g], axis=0) for g in group_list], axis=0)
+        self.data.times = np.arange(g_total)
         self.logger.info(f"Preprocessor {self.name} has identified {g_total} groups")
 
     def _transform(self):
-        self._times = self._data.times
+        self._times = self.data.times
         self.logger.info(f"Preprocessor {self.name} uses mode {self.mode}")
         match self.mode:
             case "all":
@@ -677,6 +952,9 @@ class Merger(Preprocessor):
                 return self._merge_auto()
     
     def _plot(self):
+        assert self._times is not None
+        assert self._groups is not None
+
         if self.mode != "auto":
             return
         plt.subplots()
@@ -689,7 +967,7 @@ class Merger(Preprocessor):
 class Analyzer(Processor):
 
     def analyse(self, data: XASData):
-        self._data = data
+        self.data = data
         self.logger.info(f"Analyzer {self.name} started")
         self._analyse()
         self.logger.info(f"Analyzer {self.name} finished without Problems")
@@ -703,7 +981,7 @@ class SVDDecompositor(Analyzer):
     threshold: float | None = 0
     n_comp: int | None = None
     def _analyse(self):
-        U, S, Vh = np.linalg.svd(self._data.absorption, full_matrices=False)
+        U, S, Vh = np.linalg.svd(self.data.absorption, full_matrices=False)
         if self.mode == "threshold":
             n_keep = np.sum(S > self.threshold)
         else:
@@ -713,59 +991,52 @@ class SVDDecompositor(Analyzer):
 
         fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
         fig.suptitle(f"Analyzer {self.name}")
-        step = max(int(len(self._data.times)/20), 1)
-        for i, spectra in enumerate((self._data.absorption - a_approx)[::step, :]):
-            axul.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
+        step = max(int(len(self.data.times)/20), 1)
+        for i, spectra in enumerate((self.data.absorption - a_approx)[::step, :]):
+            axul.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
 
         axur.bar(np.arange(len(S)), S)
         axur.set_yscale('log')
 
         for i, (contri, comp) in enumerate(zip((U * S).T, np.diag(S)@Vh)):
-            axll.plot(self._data.times, contri)
-            axlr.plot(self._data.energies, comp)
+            axll.plot(self.data.times, contri)
+            axlr.plot(self.data.energies, comp)
         
         axll.axhline(0, color="black")
 
 class EdgeLC(Analyzer):
-    pre: float = None
-    post: float = None
-    refs: list[Annotated[XASRef, BeforeValidator(str2Ref)] | int | tuple] = [0, -1]
-
+    pre: Optional[float] = None
+    post: Optional[float] = None
+    refs: list[XASRef]
     def _analyse(self):
         weight = 1000
         if isinstance(self.pre, type(None)):
             self.pre = self.para._pre_edge_range[1]
         if isinstance(self.post, type(None)):
             self.post = self.para._post_edge_range[0]
-        e_slice = self._data.energyRange2idx(self.para.edge_pos + self.pre, self.para.edge_pos + self.post)
+        e_slice = self.data.energyRange2idx(self.para.edge_pos + self.pre, self.para.edge_pos + self.post)
 
         ref_objects = []
         for i, r in enumerate(self.refs):
-            if isinstance(r, int):
-                ref_objects.append(XASRef(mu=self._data.absorption[r, e_slice], name=f"Ref{i}"))
-            else:
-                ref = str2Ref(r)  # Ensure conversion to XASRef
-                ref.resample(self._data.energies[e_slice])
-                ref_objects.append(ref)
+            r.pull_data(self.data.absorption[:, e_slice])
+            r.resample(self.data.energies[e_slice])
+        
+        mu = np.append(self.data.absorption[:,e_slice], np.full((len(self.data.times), 1), weight), axis=1)
+        r = [r.mu for r in self.refs]
+        refs = np.column_stack([np.append(r.mu, np.array([weight])) for r in self.refs])
 
-        self.refs = ref_objects
-        mu = np.append(self._data.absorption[:, e_slice], np.full((len(self._data.times), 1), weight), axis=1)
-        refs = np.column_stack([np.append(r.mu, [weight]) for r in self.refs])
-
-        coeffs = np.ones((len(self._data.times), len(self.refs)))
-
+        coeffs = np.ones((len(self.data.times), len(self.refs)))
         def fit_nnls(t_idx):
             coeffs[t_idx], _ = sp.optimize.nnls(refs, mu[t_idx])
 
         with ThreadPool(processes=8) as pool:
-            pool.map(fit_nnls, range(len(self._data.times)))
+            pool.map(fit_nnls, range(len(self.data.times)))
 
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         fig.suptitle(f"Analyzer {self.name}")
         for i in range(len(self.refs)):
-            color = self.refs[i].color
-            ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name, color=color)
+            ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name, color=self.refs[i].color)
         ax1.set_xlim(0, self._data.times[-1]/60)
         ax1.set_ylim(-0.01, 1.01)
         ax1.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
@@ -773,7 +1044,7 @@ class EdgeLC(Analyzer):
         ax1.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
         ax1.xaxis.set_major_locator(MultipleLocator(30))
         ax1.tick_params(length = 8, width = 1, labelsize = 14)
-        
+
         cum_coeffs = np.cumsum(coeffs, axis=1)
         hatch_patterns = ['..', '\\', '++', '//']
         width = np.min(np.diff(self._data.times))
@@ -796,7 +1067,6 @@ class EdgeLC(Analyzer):
         ax2.set_ylabel(ylabel = "Weight", labelpad = 10, fontsize = 16)
         ax2.xaxis.set_major_locator(MultipleLocator(30))
         ax2.tick_params(length = 8, width = 1, labelsize = 14)
-        
 
 
 class Plotter(Analyzer):
@@ -804,17 +1074,20 @@ class Plotter(Analyzer):
     ref: int | np.ndarray = 0
     k_order: int = 2
     def _analyse(self):
-        if self._data.normalized:
-            fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,12), layout="tight", width_ratios=(1,1))
+        if self.data.normalized:
+            fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
         else:
-            fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,12), layout="tight", width_ratios=(1,1))
+            fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,4), layout="tight", width_ratios=(1,1))
+            axll = axlr = None
+
         fig.suptitle(f"Analyzer {self.name}")
 
-        step = max(int(len(self._data.times)/20), 1)
+        step = max(int(len(self.data.times)/20), 1)
 
-        for i, spectra in enumerate(self._data.absorption[::step, :]):
-            axul.plot(self._data.energies, spectra, label=f"{self._data.times[step*i]:.0f}")
+        for i, spectra in enumerate(self.data.absorption[::step, :]):
+            axul.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
         axul.legend(frameon=False, loc="lower right", ncols=2)
+
         axul.set_xlim(*self._data.energies[[0, -1]])
         axul.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
         axul.set_ylabel("Absorption", fontsize = 16, labelpad = 10)
@@ -830,8 +1103,9 @@ class Plotter(Analyzer):
         axur.set_ylabel("Time on Stream (min)", fontsize = 16, labelpad = 10)
         axur.tick_params(axis = "both", labelsize = 14)
 
-        if self._data.normalized:
-            k, k_abs = self._data.genKspace(self.para.edge_pos)
+        if self.data.normalized:
+            assert (axll is not None) and (axlr is not None)
+            k, k_abs = self.data.genKspace(self.para.edge_pos)
             for i, spectra in enumerate(k_abs[::step, :]):
                 axll.plot(k, (spectra - 1) * k**self.k_order)
             axll.axhline(0, ls="dotted", c="black")
@@ -841,6 +1115,7 @@ class Plotter(Analyzer):
             axll.set_xlim(0, 12)
 
             X, Y = np.meshgrid(k, self._data.times/60)
+
             k_scal = k**self.k_order
             if self.diff:
                 mean = np.mean(k_abs * k_scal, axis=0)
@@ -861,8 +1136,8 @@ class Plotter(Analyzer):
 
 class EdgeDiffPlotter(Analyzer):
     def _analyse(self):
-        X, Y = np.meshgrid(self._data.energies, self._data.times)
-        diff = np.diff(self._data.absorption, 1, axis=1)
+        X, Y = np.meshgrid(self.data.energies, self.data.times)
+        diff = np.diff(self.data.absorption, 1, axis=1)
         plt.subplots()
         max_diff = np.max(np.abs(diff), axis=None)
         plt.pcolormesh(X, Y, diff[:-1], shading="auto", cmap="bwr", vmin=-max_diff, vmax=max_diff)
@@ -889,9 +1164,9 @@ class Exporter(Analyzer):
             os.makedirs(self.path)
 
         if self.mode == 'combined':
-            self._data.toNORM(self.path, self.exp_name, self.para, self.comment)
+            self.data.toNORM(self.path, self.exp_name, self.para, self.comment)
         else:
-            self._data.toNORMind(self.path, self.exp_name, self.para, self.comment)
+            self.data.toNORMind(self.path, self.exp_name, self.para, self.comment)
         self.logger.info(f"Exported Data in '{self.path}' with name '{self.exp_name}'")
 #endregion
 
@@ -901,12 +1176,13 @@ ANALYZERS = {cls.__name__: cls for cls in Analyzer.__subclasses__()}
 #region Pipeline
 class XASPipeline:
     logger: logging.Logger = logging.getLogger("XAS-Pipeline")
-    context: PipelineContext = None
+    context: PipelineContext | None = None
+
     def __init__(self):
         self._PreProcessors: list[Preprocessor] = []
         self._Analyzers: list[Analyzer] = []
 
-    def _load_global_conf(self, config: dict):
+    def _load_global_conf(self, config: dict) -> dict[Any, Any]:
         xp = {k: v for k, v in config.items() if k in inspect.signature(XASPara.__init__).parameters.keys()}
         self.defineXASParas(XASPara(**xp))
 
@@ -928,10 +1204,11 @@ class XASPipeline:
         self.context = PipelineContext.model_validate(context)
 
         for cls_name, cls_config in config.items():
+            conf = cls_config or {}
             if cls_name in PREPROCESSORS:
-                self._PreProcessors.append(PREPROCESSORS[cls_name].with_context(cls_config or {}, self.context))
+                self._PreProcessors.append(PREPROCESSORS[cls_name].with_context(conf, self.context))
             elif cls_name in ANALYZERS:
-                self._Analyzers.append(ANALYZERS[cls_name].with_context(cls_config or {}, self.context))
+                self._Analyzers.append(ANALYZERS[cls_name].with_context(conf, self.context))
 
     def addPreProcessor(self, p: Preprocessor):
         if not isinstance(p, Preprocessor):
@@ -941,7 +1218,7 @@ class XASPipeline:
     def addAnalyzer(self, a:Analyzer):
         if not isinstance(a, Analyzer):
             raise ValueError(f"processor has to be of type {Analyzer} not {type(a)}")
-        self._Analyzer.append(a)
+        self._Analyzers.append(a)
 
     def defineXASParas(self, paras: XASPara):
         Processor.para = paras
@@ -965,6 +1242,8 @@ def runPipeline(conf_path: pathlib.Path, cli_context: dict):
     logger.addHandler(console_handler)
 
     XAS = XASPipeline()
+    if not conf_path.is_absolute():
+        conf_path = pathlib.Path(__file__).parent.resolve() / conf_path
     with open(conf_path) as stream:
         try:
             config = yaml.safe_load(stream)
@@ -972,6 +1251,7 @@ def runPipeline(conf_path: pathlib.Path, cli_context: dict):
             raise ValueError(f"Problem during parsing of {conf_path}: {exc}")
     XAS.load_config(config, cli_context)
 
+    assert XAS.context is not None
     XAS.run(XASData.extracter(logger, XAS.context.path, XAS.context.exp_name, XAS.context.beamline))
 
 #region main
@@ -986,7 +1266,7 @@ def main():
 
     args = argParser.parse_args()
 
-    runPipeline(args.config, {k: v for k, v in vars(args).items() if k not in ["config"] and v is not None})
+    runPipeline(pathlib.Path(args.config), {k: v for k, v in vars(args).items() if k not in ["config"] and v is not None})
 #endregion
 
 if __name__ == "__main__":
