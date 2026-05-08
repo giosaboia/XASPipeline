@@ -511,6 +511,12 @@ class BackgroundModel(BaseModel, ABC):
     @model_validator(mode="before")
     @classmethod
     def match_class_name(cls, data: Any) -> Any:
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, dict):
+            raise ValueError()
+        if any(key in cls.model_fields.keys() for key in data.keys()):
+            return data
         if cls.__name__ not in data.keys():
             raise ValueError(f"{cls} is not in {data.keys()}")
         
@@ -598,10 +604,10 @@ class Normalizer(Preprocessor):
     """
     Normlizes the spectra.
     Args:
-        post_order (int): Polynom-order of the post_edge_line fit (Default: 3)
+        pre: ClassName and Args of the Fitting model for the PreEdge (Polynomial or Victoreen)
     """
-    pre: Union[Polynomial, Victoreen]
-    post: Union[Polynomial, KSpline]
+    pre: Union[Polynomial, Victoreen] = Polynomial(order = 1)
+    post: Union[Polynomial, KSpline] = Polynomial(order = 3)
 
     @model_validator(mode="before")
     @classmethod
@@ -700,81 +706,6 @@ class Normalizer(Preprocessor):
 
         plt.legend()
         plt.show()
-
-# class SplineNormalizer(Preprocessor):
-#     """
-#     Normlizes the spectra using a B-Spline in the post edge.
-#     Args:
-#         pre_order (int): Order of the Victoreen (Usually 1, 2 or 3; Default: 3)
-#         post_order (int): Order of the B_spline (Default: 3)
-#     """
-#     pre_order: int = 2
-#     post_order: int = 3
-#     post_weigth: int = 3
-#     _pre_edge_coeff: Optional[np.ndarray] = PrivateAttr(None)
-#     _post_Spline: list = PrivateAttr([])
-#     def _transform(self) -> None:
-#         pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
-#         post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
-
-#         if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
-#             start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
-#             self.data.energies = self.data.energies[start_idx:]
-#             self.data.absorption = self.data.absorption[:,start_idx:]
-#             self.data.validate()
-        
-#         if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
-#             stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
-#             self.data.energies = self.data.energies[:stop_idx]
-#             self.data.absorption = self.data.absorption[:,:stop_idx]
-#             self.data.validate()
-
-#         e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
-
-#         # this is actually victoreen with the exponents pre_order and 0
-#         A = np.column_stack([
-#             (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * self.data.energies)) ** self.pre_order,
-#             np.ones(len(self.data.energies))
-#         ])
-#         self._pre_edge_coeff, _, _, _ = np.linalg.lstsq(A[pre_edge_slice], self.data.absorption[:,pre_edge_slice].T)
-#         pre_edge_fit = np.dot(A, self._pre_edge_coeff).T
-#         self.data.absorption -= pre_edge_fit
-
-#         # B-spline fitting
-#         eV2revA = (2E-20 * sp.constants.e * sp.constants.m_e / sp.constants.hbar**2)
-#         post_edge_fit = np.zeros(self.data.absorption.shape)
-#         for i in range(len(self.data.times)):
-#             ks = np.sqrt((self.data.energies[post_edge_slice] - self.data.energies[e0_idx[i]]) * eV2revA)
-#             knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
-#             self._post_Spline.append(sp.interpolate.make_lsq_spline(
-#                 ks, (self.data.absorption[i,post_edge_slice] * (ks**self.post_weigth)),
-#                 knots, k = self.post_order
-#             ))
-#             post_edge_fit[i,post_edge_slice] = self._post_Spline[i](ks) * (ks**(-self.post_weigth))
-#             post_edge_fit[i,:post_edge_slice.start] = post_edge_fit[i,post_edge_slice.start]
-        
-#         self.data.absorption /= post_edge_fit
-
-#         # A =  np.vander(self.data.energies, self.post_order + 1)
-#         # self._post_edge_coeff, _, _, _ = np.linalg.lstsq(A[post_edge_slice], self.data.absorption[:,post_edge_slice].T)
-#         # self._post_edge_fit = np.dot(A, self._post_edge_coeff).T
-#         # self.data.absorption /= self._post_edge_fit
-
-#         rows_with_neg = (post_edge_fit < 0).any(axis=1)
-#         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
-#         self.data.absorption = self.data.absorption[~rows_with_neg]
-#         self.data.times = self.data.times[~rows_with_neg]
-#         self._pre_edge_coeff = self._pre_edge_coeff[:,~rows_with_neg]
-#         self._post_Spline = [s for s,i in enumerate(self._post_Spline) if i not in rows_with_neg]
-
-#         self.data.normalized = True
-
-#     def _e0_idx(self, pre_idx: int, post_idx: int):
-#         energy_slice = slice(pre_idx, post_idx)
-#         deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
-#         return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
-        
-
 
 class NoiseFilter(Preprocessor):
     """
