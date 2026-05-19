@@ -592,7 +592,7 @@ class KSpline(BackgroundModel):
         iterator = range(len(data.times[t_slice])) if isinstance(t_slice, slice) else t_slice
         for i in iterator:
             ks = np.sqrt((data.energies[e_slice] - data.energies[self._e0_idx[i]]) * eV2revA)
-            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (self.order,self.order), "edge")
             self._fitted_params.append(sp.interpolate.make_lsq_spline(
                 ks, (data.absorption[i,e_slice] * (ks**self.weigth)),
                 knots, k = self.order
@@ -739,8 +739,14 @@ class NoiseFilter(Preprocessor):
     Filters out Spectra with large noise-to-signal ratio. After normalization the spectra with low signal exhibit large noise.
     Args:
         gate (float): multipier of the median RMS that serves as the cutoff (Default: 3)
+        cutoff(float): this multiplied with the median is the largest value displayed in the histogram (Default: 20)
+        bin_size(float): size of the bins (relative to the median) in the histogram plot (Default: 0.25)
+        log(bool): decide weather the histogram should have a logarithmic y axis or not (Default: False)
     """
     gate: float = 3
+    cutoff: float = 20
+    bin_size: float = 0.25
+    log: bool = False
 
     def _transform(self) -> None:
         rms_noise = np.sqrt(np.mean(np.square(np.diff(self.data.absorption, n=2, axis=1)), axis=1))
@@ -748,12 +754,15 @@ class NoiseFilter(Preprocessor):
         threshold = self.gate * np.median(rms_noise)
         mask = rms_noise < threshold
         if self.plot:
+            scaled_noise = np.clip(rms_noise / np.median(rms_noise), 0, self.cutoff)
+            bins = np.arange(0, self.cutoff + self.bin_size + 0.001, self.bin_size, dtype=np.float64)
+            print(bins)
+
             plt.subplots()
             plt.title(f"Preprocessor {self.name}")
-            # num_bins = int(np.ceil(rms_noise.max() / (np.median(rms_noise) / 8))) + 1
-            # plt.hist(rms_noise, log=True, bins=[i * np.median(rms_noise) / 8 for i in range(num_bins)])
-            plt.hist(rms_noise, log=True)
-            plt.axvline(threshold, color="black", ls="dotted")
+            plt.hist(scaled_noise, bins=bins.tolist(), log=self.log)
+            plt.axvline(self.gate, color="black", ls="dotted")
+            plt.axvline(self.cutoff, color="black")
             plt.show()
 
         if np.sum(~mask):
