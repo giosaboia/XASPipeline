@@ -8,11 +8,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import scipy as sp
+import matplotlib.colors as mcolors
 
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from datetime import datetime
 from matplotlib import colormaps
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Slider
 from matplotlib import axes, figure, widgets, text, collections, lines
@@ -492,9 +494,13 @@ class Preprocessor(Processor):
 
     def _plot(self) -> None:
         step = max(int(len(self.data.times)/20), 1)
-        plt.subplots()
+        fig, ax = plt.subplots()
+        norm = plt.Normalize(self.data.times[0], self.data.times[-1])
+        cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['royalblue', 'firebrick'])
         for i, spectra in enumerate(self.data.absorption[::step, :]):
-            plt.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
+            color = cmap(norm(self.data.times[step*i]))
+            ax.plot(self.data.energies, spectra, color=color, label=f"{self.data.times[step*i]:.0f}")
+        plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label='Time (s)')
         plt.title(f"Preprocessor {self.name}")
         plt.legend(frameon=False, loc="lower right", ncols=2)
         plt.show()
