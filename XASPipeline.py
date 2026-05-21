@@ -1004,7 +1004,7 @@ class EdgeLC(Analyzer):
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         fig.suptitle(f"Analyzer {self.name}")
         for i in range(len(self.refs)):
-            ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name, color=self.refs[i].color)
+            ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name.split('_')[0], color=self.refs[i].color)
         ax1.set_xlim(0, self._data.times[-1]/60)
         ax1.set_ylim(-0.01, 1.01)
         ax1.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
@@ -1021,7 +1021,7 @@ class EdgeLC(Analyzer):
             hatch = hatch_patterns[i % len(hatch_patterns)]
             ax2.fill_between(self._data.times/60,
                              cum_coeffs[:, i],
-                             label=self.refs[i].name,
+                             label=self.refs[i].name.split('_')[0],
                              color=color,
                              hatch=hatch,
                              alpha=0.9,
@@ -1051,10 +1051,13 @@ class Plotter(Analyzer):
         fig.suptitle(f"Analyzer {self.name}")
 
         step = max(int(len(self.data.times)/20), 1)
+        norm = plt.Normalize(self._data.times[0], self._data.times[-1])
+        cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['royalblue', 'firebrick'])
 
         for i, spectra in enumerate(self.data.absorption[::step, :]):
-            axul.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
-        axul.legend(frameon=False, loc="lower right", ncols=2)
+            color = cmap(norm(self._data.times[step*i]))
+            axul.plot(self.data.energies, spectra, color= color, label=f"{self.data.times[step*i]:.0f}")
+        axul.legend(frameon=False, loc="lower right", ncols=3)
 
         axul.set_xlim(*self._data.energies[[0, -1]])
         axul.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
@@ -1075,12 +1078,12 @@ class Plotter(Analyzer):
             assert (axll is not None) and (axlr is not None)
             k, k_abs = self.data.genKspace(self.para.edge_pos)
             for i, spectra in enumerate(k_abs[::step, :]):
-                axll.plot(k, (spectra - 1) * k**self.k_order)
+                color = cmap(norm(self._data.times[step*i]))
+                axll.plot(k, (spectra - 1) * k**self.k_order, color=color)
             axll.axhline(0, ls="dotted", c="black")
             axll.set_xlabel("k (Å⁻¹)", fontsize = 16, labelpad = 10)
             axll.set_ylabel("k³χ(k)", fontsize = 16, labelpad = 10)
             axll.tick_params(axis = "both", labelsize = 14)
-            axll.set_xlim(0, 12)
 
             X, Y = np.meshgrid(k, self._data.times/60)
 
