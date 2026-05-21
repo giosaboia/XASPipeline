@@ -1002,7 +1002,6 @@ class EdgeLC(Analyzer):
 
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-        fig.suptitle(f"Analyzer {self.name}")
         for i in range(len(self.refs)):
             ax1.plot(self._data.times/60, coeffs[:, i], label=self.refs[i].name.split('_')[0], color=self.refs[i].color)
         ax1.set_xlim(0, self._data.times[-1]/60)
@@ -1047,9 +1046,6 @@ class Plotter(Analyzer):
         else:
             fig, (axul, axur) = plt.subplots(1, 2, figsize=(12,4), layout="tight", width_ratios=(1,1))
             axll = axlr = None
-
-        fig.suptitle(f"Analyzer {self.name}")
-
         step = max(int(len(self.data.times)/20), 1)
         norm = plt.Normalize(self._data.times[0], self._data.times[-1])
         cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['royalblue', 'firebrick'])
