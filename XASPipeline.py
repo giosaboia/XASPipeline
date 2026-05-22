@@ -17,6 +17,7 @@ from matplotlib import colormaps
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Slider
+from matplotlib.ticker import AutoMinorLocator
 from matplotlib import axes, figure, widgets, text, collections, lines
 from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
@@ -495,14 +496,19 @@ class Preprocessor(Processor):
     def _plot(self) -> None:
         step = max(int(len(self.data.times)/20), 1)
         fig, ax = plt.subplots()
-        norm = plt.Normalize(self.data.times[0], self.data.times[-1])
-        cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['royalblue', 'firebrick'])
+        times_min = self.data.times / 60
+        norm = plt.Normalize(times_min[0], times_min[-1])
+        cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['#750002', '#436436'])
         for i, spectra in enumerate(self.data.absorption[::step, :]):
-            color = cmap(norm(self.data.times[step*i]))
-            ax.plot(self.data.energies, spectra, color=color, label=f"{self.data.times[step*i]:.0f}")
-        plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label='Time (s)')
+            color = cmap(norm(times_min[step*i]))
+            ax.plot(self.data.energies, spectra, color=color, label=f"{times_min[step*i]:.1f}")
+        plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label='Time (min)')
+        plt.xlim(self._data.energies[0], self._data.energies[0] + 900)
+        major_ticks = np.linspace(self._data.energies[0], self._data.energies[0] + 900, 7)
+        plt.xticks(major_ticks)
+        plt.gca().xaxis.set_minor_locator(AutoMinorLocator(5))
         plt.title(f"Preprocessor {self.name}")
-        plt.legend(frameon=False, loc="lower right", ncols=2)
+        plt.legend(frameon=False, loc="lower right", ncols=3)
         plt.show()
 
 
@@ -927,8 +933,11 @@ class Merger(Preprocessor):
             return
         plt.subplots()
         plt.title(f"Preprocessor {self.name}")
+        cmap = LinearSegmentedColormap.from_list('royal_firebrick', ['royalblue', 'firebrick'])
+        norm = plt.Normalize(min(self._groups), max(self._groups))
         for t,g in zip(self._times, self._groups):
-            plt.axvline(t, c=f"C{g}")
+            plt.axvline(t, color=cmap(norm(g)))
+        
 #endregion
 
 #region Analyser
@@ -1007,8 +1016,8 @@ class EdgeLC(Analyzer):
         ax1.set_xlim(0, self._data.times[-1]/60)
         ax1.set_ylim(-0.01, 1.01)
         ax1.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
-        ax1.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
-        ax1.set_ylabel(ylabel = "Contribution (%)", labelpad = 10, fontsize = 16)
+        ax1.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 5, fontsize = 16)
+        ax1.set_ylabel(ylabel = "Phase Contribution (%)", labelpad = 5, fontsize = 16)
         ax1.xaxis.set_major_locator(MultipleLocator(30))
         ax1.tick_params(length = 8, width = 1, labelsize = 14)
 
@@ -1030,8 +1039,8 @@ class EdgeLC(Analyzer):
         ax2.set_ylim(0, 1)
         ax2.set_xlim(0, self._data.times[-1]/60)
         ax2.legend(loc = "upper center", bbox_to_anchor=(0.5, 1.075), frameon = False, ncols = 3)
-        ax2.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 10, fontsize = 16)
-        ax2.set_ylabel(ylabel = "Weight", labelpad = 10, fontsize = 16)
+        ax2.set_xlabel(xlabel = "Time on Stream (min)", labelpad = 5, fontsize = 16)
+        ax2.set_ylabel(ylabel = "Phase Contribution", labelpad = 5, fontsize = 16)
         ax2.xaxis.set_major_locator(MultipleLocator(30))
         ax2.tick_params(length = 8, width = 1, labelsize = 14)
 
@@ -1055,10 +1064,14 @@ class Plotter(Analyzer):
             axul.plot(self.data.energies, spectra, color= color, label=f"{self.data.times[step*i]:.0f}")
         axul.legend(frameon=False, loc="lower right", ncols=3)
 
-        axul.set_xlim(*self._data.energies[[0, -1]])
+        axul.set_xlim(self._data.energies[0], self._data.energies[0] + 900)
+        major_ticks = np.linspace(self._data.energies[0], self._data.energies[0]+900, 7)
+        axul.set_xticks(major_ticks)
+        axul.xaxis.set_minor_locator(AutoMinorLocator(5))
         axul.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
         axul.set_ylabel("Absorption", fontsize = 16, labelpad = 10)
-        axul.tick_params(axis = "both", labelsize = 14)
+        axul.tick_params(axis = "both", which = "major", labelsize = 14, length = 6)
+        axul.tick_params(axis = "both", which = "minor", labelsize = 14, length = 4)
 
         X, Y = np.meshgrid(self._data.energies, self._data.times/60)
         if self.diff:
@@ -1066,9 +1079,14 @@ class Plotter(Analyzer):
             axur.pcolormesh(X, Y, self._data.absorption-mean, cmap="copper", shading="gouraud")
         else:
             axur.pcolormesh(X, Y, self._data.absorption, cmap="copper", shading="gouraud")
+        axur.set_xlim(self._data.energies[0], self._data.energies[0] + 900)
+        major_ticks = np.linspace(self._data.energies[0], self._data.energies[0]+900, 7)
+        axur.set_xticks(major_ticks)
+        axur.xaxis.set_minor_locator(AutoMinorLocator(5))
         axur.set_xlabel("Energy (eV)", fontsize = 16, labelpad = 10)
         axur.set_ylabel("Time on Stream (min)", fontsize = 16, labelpad = 10)
-        axur.tick_params(axis = "both", labelsize = 14)
+        axul.tick_params(axis = "both", which = "major", labelsize = 14, length = 6)
+        axul.tick_params(axis = "both", which = "minor", labelsize = 14, length = 4)
 
         if self.data.normalized:
             assert (axll is not None) and (axlr is not None)
@@ -1077,8 +1095,9 @@ class Plotter(Analyzer):
                 color = cmap(norm(self._data.times[step*i]))
                 axll.plot(k, (spectra - 1) * k**self.k_order, color=color)
             axll.axhline(0, ls="dotted", c="black")
+            axll.set_xlim(0, 12)
             axll.set_xlabel("k (Å⁻¹)", fontsize = 16, labelpad = 10)
-            axll.set_ylabel("k³χ(k)", fontsize = 16, labelpad = 10)
+            axll.set_ylabel("k²χ(k)", fontsize = 16, labelpad = 10)
             axll.tick_params(axis = "both", labelsize = 14)
 
             X, Y = np.meshgrid(k, self._data.times/60)
