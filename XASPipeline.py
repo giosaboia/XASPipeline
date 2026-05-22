@@ -1047,9 +1047,12 @@ class EdgeLC(Analyzer):
 
 class Plotter(Analyzer):
     diff: bool = True
-    ref: int | np.ndarray = 0
+    ref: XASRef = 0
     k_order: int = 2
     def _analyse(self):
+        self.ref.pull_data(self.data.absorption)
+        self.ref.resample(self.data.energies)
+        
         if self.data.normalized:
             fig, ((axul, axur), (axll, axlr)) = plt.subplots(2, 2, figsize=(12,8), layout="tight", width_ratios=(1,1))
         else:
