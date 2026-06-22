@@ -305,7 +305,10 @@ class XASRef(BaseModel):
 
     @model_validator(mode='before')
     @classmethod
-    def from_conf(cls, conf: list[Any]) -> dict[Any,Any]:
+    def from_conf(cls, conf: Any) -> dict[Any,Any]:
+        if isinstance(conf, dict):
+            return conf
+        
         if not conf:
             raise ValueError("XASRef configuration list cannot be empty")
         ref = conf[0]
@@ -328,7 +331,7 @@ class XASRef(BaseModel):
     
     def pull_data(self, mu: npt.NDArray):
         if self.source_idx is not None:
-            self.absorption = mu[self.source_idx]
+            self._mu = mu[self.source_idx]
 
     def resample(self, target_energy: np.ndarray):
         if self._mu is not None:
@@ -1047,7 +1050,7 @@ class EdgeLC(Analyzer):
 
 class Plotter(Analyzer):
     diff: bool = True
-    ref: XASRef = 0
+    ref: XASRef = XASRef(name="first-spec", source_idx=0)
     k_order: int = 2
     def _analyse(self):
         self.ref.pull_data(self.data.absorption)
